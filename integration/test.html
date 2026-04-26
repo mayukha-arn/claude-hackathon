@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>brain.js — Test Harness</title>
+  <style>
+    body { font-family: monospace; background: #111; color: #ddd; padding: 16px; }
+    h2   { color: #00d4ff; margin-top: 24px; }
+    button { background: #222; color: #eee; border: 1px solid #444; padding: 6px 14px;
+             margin: 4px; cursor: pointer; border-radius: 4px; font-size: 13px; }
+    button:hover { background: #333; }
+    #log { background: #0a0a0f; border: 1px solid #333; padding: 10px; height: 260px;
+           overflow-y: auto; font-size: 12px; white-space: pre-wrap; margin-top: 8px; }
+    .flag   { color: #ef4444; }
+    .interv { color: #f59e0b; }
+    .update { color: #4ade80; }
+    .score  { color: #60a5fa; }
+    .info   { color: #a3a3a3; }
+    label   { margin-right: 6px; }
+    input[type=range] { width: 120px; vertical-align: middle; }
+    .row { margin: 6px 0; }
+  </style>
+</head>
+<body>
+<h1 style="color:#00d4ff">AdaptIQ — brain.js Test Harness</h1>
+
+<h2>1. Select Profile</h2>
+<button onclick="selectProfile('special_needs')">Special Needs Tutor</button>
+<button onclick="selectProfile('interview_coach')">Interview Coach</button>
+<button onclick="selectProfile('language_teacher')">Language Teacher</button>
+
+<h2>2. Fire Fake Sensor Events</h2>
+<div class="row">
+  <label>GDS <input type="range" id="gds" min="0" max="100" value="10"></label>
+  <label>OSR <input type="range" id="osr" min="0" max="100" value="10"></label>
+  <label>HPD <input type="range" id="hpd" min="0" max="100" value="10"></label>
+</div>
+<div class="row">
+  <label>ET  <input type="range" id="et"  min="0" max="100" value="10"></label>
+  <label>BRA <input type="range" id="bra" min="0" max="100" value="10"></label>
+</div>
+<div class="row">
+  <label>VES <input type="range" id="ves" min="0" max="100" value="10"></label>
+  <label>PVS <input type="range" id="pvs" min="0" max="100" value="10"></label>
+  <label>SilR<input type="range" id="silr" min="0" max="100" value="10"></label>
+  <label>SR  <input type="range" id="sr"  min="0" max="100" value="10"></label>
+</div>
+<button onclick="emitSignals()">Emit Signals Once</button>
+<button onclick="startLoop()">Start Signal Loop (1Hz)</button>
+<button onclick="stopLoop()">Stop Loop</button>
+
+<h2>3. Scenario Shortcuts</h2>
+<button onclick="scenario('gaze_lost')">Trigger GAZE_LOST (osr=90)</button>
+<button onclick="scenario('stress')">Trigger STRESS_DETECTED (et+ves high)</button>
+<button onclick="scenario('panic')">Trigger SPEECH_PANIC (sr+ves high)</button>
+<button onclick="scenario('silence')">Trigger PROLONGED_SILENCE (silr=90)</button>
+<button onclick="scenario('normal')">Reset to Normal Signals</button>
+
+<h2>4. Session</h2>
+<button onclick="endSess()">End Session</button>
+<button onclick="clearLog()">Clear Log</button>
+
+<h2>Event Log</h2>
+<div id="log"></div>
+
+<script>
+// ===== STUBS =====
+
+// Minimal SignalBuffer (mirrors the real one)
+class SignalBuffer {
+  constructor(size = 60) { this._size = size; this._buf = []; }
+  push(v)  { this._buf.push(v); if (this._buf.length > this._size) this._buf.shift(); }
+  values() { return [...this._buf]; }
+  mean()   { if (!this._buf.length) return 0; return this._buf.reduce((a,b)=>a+b,0)/this._buf.length; }
+  stddev() {
+    if (this._buf.length < 2) return 0;
+    const m = this.mean();
+    return Math.sqrt(this._buf.reduce((a,b)=>a+(b-m)**2,0)/this._buf.length);
+  }
+  zScore(v) { const s = this.stddev(); return s === 0 ? 0 : (v - this.mean()) / s; }
+}
+window.SignalBuffer = SignalBuffer;
+
+// Event Bus
+const Bus = (() => {
+  const subs = {};
+  return {
+    on(evt, fn)   { (subs[evt] ||= []).push(fn); },
+    off(evt, fn)  { subs[evt] = (subs[evt]||[]).filter(f=>f!==fn); },
+    emit(evt, data) { (subs[evt]||[]).forEach(fn => { try { fn(data); } catch(e) { console.error(e); } }); }
+  };
+})();
+window.Bus = Bus;
+
+// Stub AudioEngine.getTranscript
+window.AudioEngine = { getTranscript: () => 'This is a test transcript with um uh filler words.' };
+</script>
+
+<!-- brain.js loaded here -->
+<script src="brain.js"></script>
+
+<script>
+// ===== TEST HARNESS =====
+let loopId = null;
+let activeProfileId = null;
+
+function log(cls, msg) {
+  const el = document.getElementById('log');
+  const ts  = new Date().toLocaleTimeString();
+  el.innerHTML += `<span class="${cls}">[${ts}] ${msg}</span>\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// Wire up Bus listeners for observation
+Bus.on('flag:fired',          d => log('flag',   `FLAG FIRED: ${d.type} (${d.severity}) — "${d.message}"`));
+Bus.on('intervention:trigger',d => log('interv', `INTERVENTION: action=${d.action} msg="${d.message||''}" chunk="${d.chunk||''}"`));
+Bus.on('signal:update',       d => log('update', `CES=${d.ces?.toFixed(1)} gds=${d.gds?.toFixed(1)} osr=${d.osr?.toFixed(1)} hpd=${d.hpd?.toFixed(1)} et=${d.et?.toFixed(1)}`));
+Bus.on('scores:update',       d => log('score',  `SCORES: eyeContact=${d.eyeContact?.toFixed(1)} headStab=${d.headStability?.toFixed(1)} vocal=${d.vocalConfidence?.toFixed(1)} clarity=${d.speechClarity?.toFixed(1)} overall=${d.overall?.toFixed(1)} (${d.grade})`));
+Bus.on('calibration:complete',d => log('info',   `CALIBRATION COMPLETE: type=${d.type}`));
+Bus.on('session:end',         d => log('info',   `SESSION END — flags=${d.summary?.total_flags} ces=${d.summary?.ces_final?.toFixed(1)}`));
+Bus.on('session:debrief',     d => log('info',   `DEBRIEF: ${d.text?.slice(0,120)}...`));
+
+function selectProfile(id) {
+  activeProfileId = id;
+  BrainManager.init(id);
+  BrainManager.start();
+  log('info', `Profile selected: ${id}. Calibrating for 30s — signals collected but no flags during this window.`);
+}
+
+function getSliders() {
+  return {
+    gds:  +document.getElementById('gds').value,
+    osr:  +document.getElementById('osr').value,
+    hpd:  +document.getElementById('hpd').value,
+    et:   +document.getElementById('et').value,
+    bra:  +document.getElementById('bra').value,
+    ves:  +document.getElementById('ves').value,
+    pvs:  +document.getElementById('pvs').value,
+    silr: +document.getElementById('silr').value,
+    sr:   +document.getElementById('sr').value,
+  };
+}
+
+function setSliders(vals) {
+  Object.entries(vals).forEach(([k,v]) => {
+    const el = document.getElementById(k);
+    if (el) el.value = v;
+  });
+}
+
+function emitSignals() {
+  const s = getSliders();
+  Bus.emit('signal:face',  { et: s.et, hpd: s.hpd, bra: s.bra, landmarks: null, expressions: null, bbox: null });
+  Bus.emit('signal:gaze',  { gds: s.gds, osr: s.osr, x: 400, y: 300 });
+  Bus.emit('signal:audio', { ves: s.ves, pvs: s.pvs, silr: s.silr, sr: s.sr, transcript: AudioEngine.getTranscript() });
+}
+
+function startLoop() {
+  stopLoop();
+  loopId = setInterval(emitSignals, 1000);
+  log('info', 'Signal loop started (1Hz)');
+}
+
+function stopLoop() {
+  if (loopId) { clearInterval(loopId); loopId = null; log('info', 'Signal loop stopped'); }
+}
+
+const SCENARIOS = {
+  gaze_lost: { gds: 50, osr: 90, hpd: 20, et: 20, bra: 15, ves: 20, pvs: 20, silr: 10, sr: 30 },
+  stress:    { gds: 30, osr: 20, hpd: 20, et: 85, bra: 30, ves: 80, pvs: 75, silr: 10, sr: 50 },
+  panic:     { gds: 30, osr: 20, hpd: 20, et: 50, bra: 20, ves: 85, pvs: 40, silr: 5,  sr: 85 },
+  silence:   { gds: 10, osr: 10, hpd: 10, et: 10, bra: 10, ves: 5,  pvs: 5,  silr: 90, sr: 5  },
+  normal:    { gds: 10, osr: 15, hpd: 8,  et: 12, bra: 10, ves: 20, pvs: 15, silr: 10, sr: 30 },
+};
+
+function scenario(name) {
+  const vals = SCENARIOS[name];
+  if (!vals) return;
+  setSliders(vals);
+  // Fire repeatedly so sustained-duration counters build up
+  for (let i = 0; i < 3; i++) setTimeout(emitSignals, i * 300);
+  log('info', `Scenario "${name}" loaded. Keep the signal loop running to sustain it.`);
+}
+
+async function endSess() {
+  stopLoop();
+  BrainManager.stop();
+  await BrainManager.endSession();
+}
+
+function clearLog() { document.getElementById('log').innerHTML = ''; }
+
+log('info', 'Harness ready. Select a profile to begin.');
+</script>
+</body>
+</html>
