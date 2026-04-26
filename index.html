@@ -659,6 +659,74 @@
     /* =============================================
        SCORE RING SECTION
     ============================================= */
+    /* =============================================
+       QUESTION CARD
+    ============================================= */
+    .question-card {
+      flex-shrink: 0;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .question-card-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .question-card-category {
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--cyan);
+    }
+    .question-card-progress {
+      font-size: 9px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    .question-card-text {
+      font-size: 14px;
+      color: var(--text-primary);
+      font-family: var(--font-display);
+      font-weight: 600;
+      line-height: 1.4;
+    }
+    .question-card-nav {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: flex-end;
+    }
+    .question-btn {
+      padding: 4px 12px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all var(--transition);
+      letter-spacing: 0.06em;
+    }
+    .question-btn:hover:not(:disabled) {
+      border-color: var(--cyan);
+      color: var(--cyan);
+      background: var(--cyan-dim);
+    }
+    .question-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+    .question-btn.primary {
+      border-color: var(--cyan);
+      color: var(--cyan);
+      background: var(--cyan-dim);
+    }
+
     .scores-section {
       padding: 16px;
       border-bottom: 1px solid var(--border);
@@ -1355,8 +1423,22 @@
         </div>
       </div>
 
-      <!-- CENTER: Video feed -->
+      <!-- CENTER: Question + Video -->
       <div class="dash-center">
+
+        <!-- Question Card -->
+        <div class="question-card" id="question-card">
+          <div class="question-card-meta">
+            <span class="question-card-category" id="question-category">Basic Information</span>
+            <span class="question-card-progress" id="question-progress">1 / 26</span>
+          </div>
+          <div class="question-card-text" id="question-text">What is your name?</div>
+          <div class="question-card-nav">
+            <button class="question-btn" id="btn-prev-q" disabled>← Prev</button>
+            <button class="question-btn primary" id="btn-next-q">Next →</button>
+          </div>
+        </div>
+
         <!-- Score section -->
         <div class="scores-section">
           <div class="score-ring-wrap">
@@ -2182,7 +2264,7 @@ const AudioEngine = (() => {
         silenceThreshold = Math.max(0.005, Math.min(0.02, minAmbient * 2));
       }
       silenceWindows.push(rms < silenceThreshold);
-      if (silenceWindows.length > 15) silenceWindows.shift();
+      if (silenceWindows.length > 8) silenceWindows.shift(); // 8×2s = 16s window (was 30s)
       const silr = (silenceWindows.filter(Boolean).length / silenceWindows.length) * 100;
 
       // SR: 0 when no speech yet (not penalised until user starts speaking)
@@ -2339,7 +2421,7 @@ const AnomalyDetector = (() => {
     STRESS_DETECTED:    5000,
     FOCUS_DRIFT:        8000,
     SPEECH_PANIC:       3000,
-    PROLONGED_SILENCE:  15000,
+    PROLONGED_SILENCE:  5000,
     OVERCONFIDENT_PACE: 10000,
   };
 
@@ -2417,7 +2499,7 @@ const AnomalyDetector = (() => {
       case 'STRESS_DETECTED':    return getZ('et') > z && (getZ('ves') > z || getZ('pvs') > z);
       case 'FOCUS_DRIFT':        return getZ('gds') > z * 0.8 && getZ('hpd') > z * 0.8;
       case 'SPEECH_PANIC':       return getVal('sr') > 70 && getZ('ves') > z;
-      case 'PROLONGED_SILENCE':  return getVal('silr') > 80;
+      case 'PROLONGED_SILENCE':  return getVal('silr') > 60;
       case 'OVERCONFIDENT_PACE': return getVal('sr') > 60 && getVal('pvs') < 10;
       default:                   return false;
     }
@@ -2763,6 +2845,99 @@ window.BrainManager = {
 };
   </script>
 
+  <script>
+  // === QUESTION MANAGER === //
+  window.QuestionManager = (() => {
+    const QUESTIONS = [
+      // Basic Information
+      { cat: 'Basic Information',      q: 'What is your name?' },
+      { cat: 'Basic Information',      q: 'What college do you go to?' },
+      { cat: 'Basic Information',      q: 'What is your major?' },
+      { cat: 'Basic Information',      q: 'Why did you choose your major?' },
+      // Interest & Goals
+      { cat: 'Interest & Goals',       q: 'What companies are you interested in?' },
+      { cat: 'Interest & Goals',       q: 'What role or job position are you looking for?' },
+      { cat: 'Interest & Goals',       q: 'Where are you located?' },
+      // About You
+      { cat: 'About You',              q: 'Tell me about yourself.' },
+      { cat: 'About You',              q: 'How did you hear about this job?' },
+      { cat: 'About You',              q: 'What are you looking for in a job or internship?' },
+      // Experience
+      { cat: 'Experience',             q: 'Have you worked on a team before? Tell us about it.' },
+      { cat: 'Experience',             q: 'How do you handle disagreements with team members?' },
+      { cat: 'Experience',             q: 'Describe a time you helped someone on your team.' },
+      { cat: 'Experience',             q: 'Have you ever led a group or project?' },
+      { cat: 'Experience',             q: 'Describe a time you took initiative without being asked.' },
+      { cat: 'Experience',             q: 'How do you encourage others to participate?' },
+      // Challenges
+      { cat: 'Challenges',             q: 'Tell me about a mistake you made and what you learned.' },
+      { cat: 'Challenges',             q: 'Describe a time you failed. What would you do differently?' },
+      { cat: 'Challenges',             q: 'Tell me about a time you had multiple things due at once. How did you manage?' },
+      { cat: 'Challenges',             q: 'How do you handle stressful situations?' },
+      // Strengths & Development
+      { cat: 'Strengths & Development',q: 'What is one of your strengths? Give an example.' },
+      { cat: 'Strengths & Development',q: 'What is one area where you want to improve?' },
+      { cat: 'Strengths & Development',q: 'Where do you see yourself in five years?' },
+      // Closing
+      { cat: 'Closing',                q: 'Why should we hire you?' },
+      { cat: 'Closing',                q: 'What are your salary expectations?' },
+      { cat: 'Closing',                q: 'Do you have any questions for us?' },
+    ];
+
+    let current = 0;
+
+    function render() {
+      const q = QUESTIONS[current];
+      const textEl     = document.getElementById('question-text');
+      const catEl      = document.getElementById('question-category');
+      const progEl     = document.getElementById('question-progress');
+      const prevBtn    = document.getElementById('btn-prev-q');
+      const nextBtn    = document.getElementById('btn-next-q');
+      if (!textEl) return;
+
+      textEl.textContent  = q.q;
+      catEl.textContent   = q.cat;
+      progEl.textContent  = `${current + 1} / ${QUESTIONS.length}`;
+      prevBtn.disabled    = current === 0;
+      nextBtn.disabled    = current === QUESTIONS.length - 1;
+      nextBtn.textContent = current === QUESTIONS.length - 1 ? 'Done' : 'Next →';
+    }
+
+    function next() { if (current < QUESTIONS.length - 1) { current++; render(); } }
+    function prev() { if (current > 0) { current--; render(); } }
+    function reset() { current = 0; render(); }
+
+    function init() {
+      const prevBtn = document.getElementById('btn-prev-q');
+      const nextBtn = document.getElementById('btn-next-q');
+      if (!prevBtn || !nextBtn) return;
+
+      prevBtn.addEventListener('click', prev);
+      nextBtn.addEventListener('click', next);
+
+      // Arrow key navigation when dashboard is active
+      document.addEventListener('keydown', (e) => {
+        const card = document.getElementById('question-card');
+        if (!card || !document.getElementById('screen-dashboard')?.classList.contains('active')) return;
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (e.key === 'ArrowRight') next();
+        if (e.key === 'ArrowLeft')  prev();
+      });
+
+      render();
+    }
+
+    // Reset to Q1 at the start of every session
+    if (typeof Bus !== 'undefined') {
+      Bus.on('calibration:complete', ({ type }) => {
+        if (type === 'gaze') reset();
+      });
+    }
+
+    return { init, next, prev, reset, total: QUESTIONS.length };
+  })();
+  </script>
+
   <script src="ui.js"></script>
 
   <script>
@@ -2770,6 +2945,7 @@ window.BrainManager = {
     (async () => {
       // Boot UI (runs loading sequence, then shows profile screen)
       if (window.AdaptIQ_UI) window.AdaptIQ_UI.init();
+      if (window.QuestionManager) window.QuestionManager.init();
 
       // Wire Demo Mode toggle — reads checkbox state each time a profile is selected so it can be toggled on profile screen
       window.DEMO_MODE = false;
