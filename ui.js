@@ -18,7 +18,10 @@ window.AdaptIQ_UI = (() => {
     profile: null,
     sessionStart: null,
     sessionTimerInterval: null,
+    engagementTimerInterval: null,
     sessionSeconds: 0,
+    engagedSeconds: 0,
+    lastFaceTime: 0,
     scores: { eyeContact: 0, headStability: 0, vocalConfidence: 0, speechClarity: 0, overall: 0, grade: '—' },
     metrics: { gds: 0, osr: 0, hpd: 0, et: 0, ves: 0, pvs: 0, silr: 0, sr: 0, bra: 0, ces: 0 },
     faceDetected: false,
@@ -136,15 +139,38 @@ window.AdaptIQ_UI = (() => {
     const W = canvas.width;
     const H = canvas.height;
     let t = 0;
+    let gazeReady    = false;
+    let currentPoint = 0;
 
     const points = Array.from({ length: 9 }, (_, i) => ({
       x: (0.2 + 0.3 * (i % 3)) * W,
       y: (0.25 + 0.25 * Math.floor(i / 3)) * H,
-      active: false, done: false,
+      progress: 0,
+      done: false,
     }));
 
-    let currentPoint = 0;
-    let pointTimer = 0;
+    // Update instruction text helper
+    const instrEl = document.getElementById('calib-instruction');
+    function setInstruction(html) { if (instrEl) instrEl.innerHTML = html; }
+
+    // Gaze engine events drive dot advancement
+    const onProgress = ({ pointIndex, progress }) => {
+      if (points[pointIndex]) points[pointIndex].progress = progress;
+    };
+    const onNext = ({ pointIndex }) => {
+      if (points[pointIndex - 1]) points[pointIndex - 1].done = true;
+      currentPoint = pointIndex;
+      if (points[currentPoint]) points[currentPoint].progress = 0;
+      setInstruction(`<strong>Hold gaze on dot ${pointIndex + 1} of 9</strong> — keep still until it fills`);
+    };
+    const onReady = () => {
+      gazeReady = true;
+      setInstruction('<strong>Look at the dot</strong> — hold still until the ring fills');
+    };
+
+    Bus.on('gaze:calibration:progress', onProgress);
+    Bus.on('gaze:calibration:next',     onNext);
+    Bus.on('gaze:ready',                onReady);
 
     function draw() {
       ctx.clearRect(0, 0, W, H);
@@ -159,87 +185,81 @@ window.AdaptIQ_UI = (() => {
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
       }
 
-      // Draw calibration points
-      points.forEach((p, i) => {
-        if (i > currentPoint) return;
+      if (!gazeReady) {
+        // Loading: first dot pulses while sensors initialize
+        const pulse = 0.5 + 0.5 * Math.sin(t * 0.06);
+        const p = points[0];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 18 + 6 * pulse, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(0,229,255,${0.08 + 0.08 * pulse})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(0,229,255,${0.3 + 0.3 * pulse})`;
+        ctx.fill();
+      } else {
+        // Active: each dot shows a progress arc that fills as the user fixates
+        points.forEach((p, i) => {
+          if (i > currentPoint) return;
 
-        if (p.done) {
-          // Done state — small tick
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(0,255,136,0.3)';
-          ctx.fill();
-          ctx.strokeStyle = '#00ff88';
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-        } else if (i === currentPoint) {
-          // Active state — pulsing rings
-          const pulse = 0.5 + 0.5 * Math.sin(t * 0.08);
-          const pulse2 = 0.5 + 0.5 * Math.sin(t * 0.08 + Math.PI);
+          if (p.done) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0,255,136,0.3)';
+            ctx.fill();
+            ctx.strokeStyle = '#00ff88';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          } else if (i === currentPoint) {
+            // Static outer guide ring
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 22, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(0,229,255,0.15)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
 
-          // Outer ring
+            // Progress arc — fills as iris stays still
+            if (p.progress > 0) {
+              ctx.beginPath();
+              ctx.arc(p.x, p.y, 22, -Math.PI / 2, -Math.PI / 2 + p.progress * 2 * Math.PI);
+              ctx.strokeStyle = p.progress > 0.8 ? '#00ff88' : '#00e5ff';
+              ctx.lineWidth = 2.5;
+              ctx.stroke();
+            }
+
+            // Center dot
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+            ctx.fillStyle = '#00e5ff';
+            ctx.fill();
+
+            // Crosshair
+            ctx.strokeStyle = 'rgba(0,229,255,0.4)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath(); ctx.moveTo(p.x - 20, p.y); ctx.lineTo(p.x + 20, p.y); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(p.x, p.y - 20); ctx.lineTo(p.x, p.y + 20); ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        });
+
+        // Trail connecting completed dots
+        if (currentPoint > 0) {
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 20 + 8 * pulse, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(0,229,255,${0.15 + 0.15 * pulse2})`;
+          ctx.moveTo(points[0].x, points[0].y);
+          for (let i = 1; i <= Math.min(currentPoint, points.length - 1); i++) {
+            ctx.lineTo(points[i].x, points[i].y);
+          }
+          ctx.strokeStyle = 'rgba(0,255,136,0.2)';
           ctx.lineWidth = 1;
+          ctx.setLineDash([4, 4]);
           ctx.stroke();
-
-          // Middle ring
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
-          ctx.strokeStyle = `rgba(0,229,255,${0.4 + 0.3 * pulse})`;
-          ctx.lineWidth = 1.5;
-          ctx.stroke();
-
-          // Center dot
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-          ctx.fillStyle = '#00e5ff';
-          ctx.fill();
-
-          // Crosshair lines
-          ctx.strokeStyle = 'rgba(0,229,255,0.4)';
-          ctx.lineWidth = 1;
-          ctx.setLineDash([3, 3]);
-          ctx.beginPath(); ctx.moveTo(p.x - 20, p.y); ctx.lineTo(p.x + 20, p.y); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(p.x, p.y - 20); ctx.lineTo(p.x, p.y + 20); ctx.stroke();
           ctx.setLineDash([]);
         }
-      });
-
-      // Progress line connecting done points
-      if (currentPoint > 0) {
-        ctx.beginPath();
-        ctx.moveTo(points[0].x, points[0].y);
-        for (let i = 1; i <= Math.min(currentPoint, points.length - 1); i++) {
-          ctx.lineTo(points[i].x, points[i].y);
-        }
-        ctx.strokeStyle = 'rgba(0,255,136,0.2)';
-        ctx.lineWidth = 1;
-        ctx.setLineDash([4, 4]);
-        ctx.stroke();
-        ctx.setLineDash([]);
       }
 
       t++;
-      pointTimer++;
-
-      // Advance to next calibration point
-      if (pointTimer > 80 && currentPoint < points.length) {
-        points[currentPoint].done = true;
-        currentPoint++;
-        pointTimer = 0;
-
-        if (currentPoint >= points.length) {
-          cancelAnimationFrame(calibAnimFrame);
-          setTimeout(() => {
-            showScreen('dashboard');
-            startSession();
-          }, 600);
-          return;
-        }
-      }
-
       calibAnimFrame = requestAnimationFrame(draw);
     }
 
@@ -282,11 +302,21 @@ window.AdaptIQ_UI = (() => {
   function startSession() {
     state.sessionStart = Date.now();
     state.sessionSeconds = 0;
+    state.engagedSeconds = 0;
+    state.lastFaceTime = 0;
     initDashboard();
 
     state.sessionTimerInterval = setInterval(() => {
       state.sessionSeconds++;
       updateTimer();
+    }, 1000);
+
+    // Engagement Time: count seconds where a face was actively detected
+    state.engagementTimerInterval = setInterval(() => {
+      if (state.lastFaceTime && Date.now() - state.lastFaceTime < 2000) {
+        state.engagedSeconds++;
+        updateMetricValue('metric-et', state.engagedSeconds, 0);
+      }
     }, 1000);
 
     addEventLog('info', `Session started · Profile: <strong>${(state.profile || 'default').toUpperCase()}</strong>`);
@@ -308,6 +338,7 @@ window.AdaptIQ_UI = (() => {
 
   function endSession() {
     clearInterval(state.sessionTimerInterval);
+    clearInterval(state.engagementTimerInterval);
     if (state.intervention.timer) clearTimeout(state.intervention.timer);
     if (state.intervention.progressTimer) clearInterval(state.intervention.progressTimer);
     hideIntervention();
@@ -598,7 +629,7 @@ window.AdaptIQ_UI = (() => {
 
     // Right panel
     updateMetricValue('metric-osr',  m.osr,  1);
-    updateMetricValue('metric-et',   m.et,   0);
+    // metric-et is Engagement Time — updated by its own 1s interval in startSession, not from signal
     updateMetricValue('metric-ces',  m.ces,  2);
     updateMetricValue('metric-silr', m.silr, 2);
     updateMetricValue('metric-pvs',  m.pvs,  2);
@@ -636,8 +667,8 @@ window.AdaptIQ_UI = (() => {
     if (!data) return;
     updateVideoStatus(true);
 
-    // Propagate to individual metrics
-    if (data.et  !== undefined) updateMetricValue('metric-et', data.et, 0);
+    // Track when face was last seen — used by the engagement time counter in startSession
+    if (data.bbox) state.lastFaceTime = Date.now();
     if (data.hpd !== undefined) {
       updateMetricValue('metric-hpd', data.hpd, 1);
       pushSparkData('hpd', data.hpd);
@@ -727,7 +758,7 @@ window.AdaptIQ_UI = (() => {
         if (chunk === 0 || !state.intervention.active) {
           content.textContent = '';
         }
-        content.textContent += message || '';
+        content.textContent += chunk || '';
       }
       if (!state.intervention.active) {
         showIntervention(action, color, duration);
@@ -755,7 +786,14 @@ window.AdaptIQ_UI = (() => {
     const eyebrow = document.getElementById('intervention-eyebrow');
     const bar     = document.getElementById('intervention-progress-bar');
 
-    if (title)   title.textContent   = action || 'Adaptive Intervention';
+    const ACTION_LABELS = {
+      claude_response: 'AI Coach',
+      banner:          'Alert',
+      focus_object:    'Focus Exercise',
+      content_swap:    'Try This Instead',
+      break_timer:     'Take a Break',
+    };
+    if (title)   title.textContent   = ACTION_LABELS[action] || action || 'Adaptive Intervention';
     if (eyebrow) eyebrow.textContent = `${(state.profile || 'adaptive').toUpperCase()} · Intervention`;
 
     // Apply color theming
@@ -827,6 +865,14 @@ window.AdaptIQ_UI = (() => {
   function handleCalibrationComplete(data) {
     if (!data) return;
     updateCalibrationStage(data.type);
+    if (data.type === 'gaze') {
+      cancelAnimationFrame(calibAnimFrame); // stop canvas loop before leaving screen
+      calibAnimFrame = null;
+      setTimeout(() => {
+        showScreen('dashboard');
+        startSession();
+      }, 600);
+    }
   }
 
   // ============================================================

@@ -589,6 +589,7 @@
       padding: 12px 14px;
       position: relative;
       overflow: hidden;
+      flex-shrink: 0;
     }
     .metric-card::before {
       content: '';
@@ -1439,7 +1440,7 @@
             <div class="metric-card-badge">ET</div>
           </div>
           <div class="metric-card-value" id="metric-et">0<span class="metric-card-unit">s</span></div>
-          <div class="metric-card-label">Cumulative engaged seconds</div>
+          <div class="metric-card-label">Seconds with face detected</div>
         </div>
 
         <!-- CES -->
@@ -1632,7 +1633,7 @@ const FaceEngine = (() => {
   let blinkCount = 0;
   let blinkTimestamps = [];
   let earBelow = 0;
-  const EAR_THRESHOLD = 0.21;
+  const EAR_THRESHOLD = 0.23;  // raised from 0.21 — vladmandic landmarks run slightly tighter
   const BLINK_MIN_FRAMES = 2;
   let pitchBaseline = null;
   let pitchSamples = [];
@@ -1781,6 +1782,10 @@ const GazeEngine = (() => {
   let baseline     = null;
   let calibrating  = false;
   let calibSamples = [];
+  let calibMap     = [];
+  let calibScaleX  = null;
+  let calibScaleY  = null;
+  let calibrationCallback = null;
 
   const xBuf = new SignalBuffer(30);
   const yBuf = new SignalBuffer(30);
@@ -1802,8 +1807,10 @@ const GazeEngine = (() => {
     if (!baseline) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
     const dx = iris.avgX - baseline.avgX;
     const dy = iris.avgY - baseline.avgY;
-    const sx = window.innerWidth  / 2 + dx * (window.innerWidth  / 0.3);
-    const sy = window.innerHeight / 2 + dy * (window.innerHeight / 0.3);
+    const scX = calibScaleX ?? (window.innerWidth  / 0.3);
+    const scY = calibScaleY ?? (window.innerHeight / 0.3);
+    const sx = window.innerWidth  / 2 + dx * scX;
+    const sy = window.innerHeight / 2 + dy * scY;
     return {
       x: Math.max(0, Math.min(window.innerWidth,  sx)),
       y: Math.max(0, Math.min(window.innerHeight, sy)),
@@ -1818,11 +1825,12 @@ const GazeEngine = (() => {
     const iris = _irisRatio(lm);
 
     if (calibrating) {
-      calibSamples.push(iris);
+      if (calibrationCallback) calibrationCallback(iris);
+      else calibSamples.push(iris);
       return;
     }
 
-    if (!running) return;
+    if (!running || !baseline) return; // no real calibration baseline — skip tracking
 
     const { x, y } = _irisToScreen(iris);
     xBuf.push(x);
@@ -1876,67 +1884,187 @@ const GazeEngine = (() => {
     }, 100);
   }
 
-  function startCalibration() {
+  // Multi-point gaze calibration with a full-screen overlay.
+  // Dots span the full viewport so scale estimation is accurate.
+  // screenFracPoints: [{x,y}] as viewport fractions (0–1).
+  function startMultiPointCalibration(screenFracPoints) {
     return new Promise((resolve) => {
-      calibrating  = true;
-      calibSamples = [];
+      calibrating = true;
+      calibMap    = [];
+      let pointIndex  = 0;
+      let rawHistory  = [];   // last SMOOTH_N raw iris frames for smoothing
+      let stableSamples = []; // smoothed frames accumulated during fixation
+
+      const SMOOTH_N         = 5;    // rolling average window for noise reduction
+      const STABILITY_THRESH = 0.04; // per-axis tolerance after smoothing (~2× natural tremor)
+      const REQUIRED_STABLE  = 15;   // ~1.5s at 10fps before point advances
+
+      // ── Full-screen overlay ──
+      const CIRC = 2 * Math.PI * 22;
+      const svgNS = 'http://www.w3.org/2000/svg';
 
       const overlay = document.createElement('div');
-      overlay.id = 'gaze-calibration-overlay';
       overlay.style.cssText = `
-        position:fixed;inset:0;z-index:9999;background:rgba(10,10,15,0.95);
-        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;
+        position:fixed;inset:0;z-index:9998;background:rgba(5,8,16,0.96);pointer-events:none;
       `;
 
-      const msg = document.createElement('p');
-      msg.style.cssText = `color:#e4e4e7;font-size:1.3rem;font-family:sans-serif;text-align:center;`;
-      msg.textContent = 'Look at the dot and stay still';
+      const ring = document.createElement('div');
+      ring.style.cssText = `
+        position:absolute;width:54px;height:54px;margin:-27px 0 0 -27px;
+        border-radius:50%;border:1px solid rgba(0,229,255,0.18);
+      `;
+
+      const svg = document.createElementNS(svgNS, 'svg');
+      svg.setAttribute('width','54'); svg.setAttribute('height','54');
+      svg.style.cssText = `position:absolute;width:54px;height:54px;margin:-27px 0 0 -27px;
+        transform:rotate(-90deg);`;
+      const arc = document.createElementNS(svgNS, 'circle');
+      arc.setAttribute('cx','27'); arc.setAttribute('cy','27'); arc.setAttribute('r','22');
+      arc.setAttribute('fill','none'); arc.setAttribute('stroke','#00e5ff');
+      arc.setAttribute('stroke-width','2.5');
+      arc.setAttribute('stroke-dasharray', CIRC);
+      arc.setAttribute('stroke-dashoffset', CIRC);
+      svg.appendChild(arc);
 
       const dot = document.createElement('div');
       dot.style.cssText = `
-        width:28px;height:28px;border-radius:50%;
-        background:#00d4ff;box-shadow:0 0 24px #00d4ff;
+        position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;
+        border-radius:50%;background:#00e5ff;
+        box-shadow:0 0 14px #00e5ff,0 0 28px rgba(0,229,255,0.4);
+        transition:left 0.45s cubic-bezier(.4,0,.2,1),top 0.45s cubic-bezier(.4,0,.2,1);
       `;
 
-      const track = document.createElement('div');
-      track.style.cssText = `width:280px;height:6px;background:#2a2a3a;border-radius:3px;overflow:hidden;`;
-      const fill = document.createElement('div');
-      fill.style.cssText = `height:100%;width:0%;background:#00d4ff;transition:width 0.1s linear;`;
-      track.appendChild(fill);
+      const lbl = document.createElement('p');
+      lbl.style.cssText = `
+        position:fixed;bottom:12%;left:50%;transform:translateX(-50%);
+        color:#e4e4e7;font-family:monospace;font-size:1rem;text-align:center;
+        text-shadow:0 0 8px rgba(0,229,255,0.4);pointer-events:none;
+      `;
+      lbl.textContent = 'Look at the dot — hold still until the ring fills';
 
-      const sub = document.createElement('p');
-      sub.style.cssText = `color:#a1a1aa;font-size:0.9rem;font-family:sans-serif;`;
-      sub.textContent = 'Capturing your eye baseline…';
+      const ctr = document.createElement('p');
+      ctr.style.cssText = `
+        position:fixed;bottom:calc(12% - 26px);left:50%;transform:translateX(-50%);
+        color:#6b7280;font-family:monospace;font-size:0.82rem;pointer-events:none;
+      `;
+      ctr.textContent = `Point 1 / ${screenFracPoints.length}`;
 
-      overlay.append(msg, dot, track, sub);
+      overlay.append(ring, svg, dot, lbl, ctr);
       document.body.appendChild(overlay);
 
-      const DURATION = 3000;
-      const start = Date.now();
+      function moveDot(frac) {
+        const x = frac.x * window.innerWidth;
+        const y = frac.y * window.innerHeight;
+        [dot, ring, svg].forEach(el => {
+          el.style.left = x + 'px';
+          el.style.top  = y + 'px';
+        });
+        arc.setAttribute('stroke-dashoffset', CIRC);
+      }
+      moveDot(screenFracPoints[0]);
 
-      const tick = setInterval(() => {
-        const elapsed = Date.now() - start;
-        fill.style.width = Math.min(100, elapsed / DURATION * 100) + '%';
+      function finish() {
+        calibrating = false;
+        calibrationCallback = null;
+        clearTimeout(timeoutId);
+        if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+        _buildCalibration();
+        Bus.emit('calibration:complete', { type: 'gaze' });
+        resolve(calibMap);
+      }
 
-        if (elapsed >= DURATION) {
-          clearInterval(tick);
-          calibrating = false;
+      // 30s safety timeout in case camera is off or face never detected
+      const timeoutId = setTimeout(finish, 30000);
 
-          if (calibSamples.length > 5) {
-            baseline = {
-              avgX: calibSamples.reduce((s, v) => s + v.avgX, 0) / calibSamples.length,
-              avgY: calibSamples.reduce((s, v) => s + v.avgY, 0) / calibSamples.length,
-            };
-          } else {
-            baseline = { avgX: 0.5, avgY: 0.5 };
-          }
+      calibrationCallback = (iris) => {
+        // Smooth with rolling average to suppress sub-pixel landmark jitter
+        rawHistory.push(iris);
+        if (rawHistory.length > SMOOTH_N) rawHistory.shift();
+        const smoothed = {
+          avgX: rawHistory.reduce((s, v) => s + v.avgX, 0) / rawHistory.length,
+          avgY: rawHistory.reduce((s, v) => s + v.avgY, 0) / rawHistory.length,
+        };
 
-          document.body.removeChild(overlay);
-          Bus.emit('calibration:complete', { type: 'gaze' });
-          resolve();
+        // Compare smoothed to mean of stable buffer (not consecutive frames)
+        let isStable = true;
+        if (stableSamples.length > 0) {
+          const mX = stableSamples.reduce((s, v) => s + v.avgX, 0) / stableSamples.length;
+          const mY = stableSamples.reduce((s, v) => s + v.avgY, 0) / stableSamples.length;
+          isStable = Math.abs(smoothed.avgX - mX) < STABILITY_THRESH &&
+                     Math.abs(smoothed.avgY - mY) < STABILITY_THRESH;
         }
-      }, 100);
+
+        if (isStable) {
+          stableSamples.push(smoothed);
+        } else {
+          stableSamples = [];
+          rawHistory    = [];
+        }
+
+        const progress = Math.min(1, stableSamples.length / REQUIRED_STABLE);
+        arc.setAttribute('stroke-dashoffset', CIRC * (1 - progress));
+        // Change arc colour near completion
+        arc.setAttribute('stroke', progress > 0.85 ? '#00ff88' : '#00e5ff');
+        Bus.emit('gaze:calibration:progress', { pointIndex, progress });
+
+        if (stableSamples.length >= REQUIRED_STABLE) {
+          const avgX = stableSamples.reduce((s, v) => s + v.avgX, 0) / stableSamples.length;
+          const avgY = stableSamples.reduce((s, v) => s + v.avgY, 0) / stableSamples.length;
+          calibMap.push({ iris: { avgX, avgY }, screen: screenFracPoints[pointIndex] });
+          stableSamples = [];
+          rawHistory    = [];
+          pointIndex++;
+
+          if (pointIndex >= screenFracPoints.length) {
+            finish();
+          } else {
+            Bus.emit('gaze:calibration:next', { pointIndex });
+            ctr.textContent = `Point ${pointIndex + 1} / ${screenFracPoints.length}`;
+            arc.setAttribute('stroke', '#00e5ff');
+            // Brief pause (dot transition animation) before activating next point
+            setTimeout(() => moveDot(screenFracPoints[pointIndex]), 450);
+          }
+        }
+      };
     });
+  }
+
+  // Build baseline + calibrated scale from collected points.
+  // Scale is only accepted when within 30%–300% of the default (sanity guard).
+  function _buildCalibration() {
+    if (!calibMap.length) { baseline = null; return; }
+
+    // Use point nearest screen center as baseline ("straight ahead")
+    const centerPt = calibMap.reduce((best, p) => {
+      const d  = Math.abs(p.screen.x - 0.5) + Math.abs(p.screen.y - 0.5);
+      const bd = Math.abs(best.screen.x - 0.5) + Math.abs(best.screen.y - 0.5);
+      return d < bd ? p : best;
+    }, calibMap[0]);
+    baseline = centerPt.iris;
+
+    if (calibMap.length < 3) return; // not enough points for scale estimation
+
+    const xScales = [], yScales = [];
+    calibMap.forEach(p => {
+      const idx = p.iris.avgX - baseline.avgX;
+      const idy = p.iris.avgY - baseline.avgY;
+      const sdx = (p.screen.x - 0.5) * window.innerWidth;
+      const sdy = (p.screen.y - 0.5) * window.innerHeight;
+      if (Math.abs(idx) > 0.005) xScales.push(sdx / idx);
+      if (Math.abs(idy) > 0.005) yScales.push(sdy / idy);
+    });
+
+    const defX = window.innerWidth  / 0.3;
+    const defY = window.innerHeight / 0.3;
+
+    if (xScales.length) {
+      const c = xScales.reduce((a, b) => a + b) / xScales.length;
+      if (c > defX * 0.3 && c < defX * 3) calibScaleX = c;
+    }
+    if (yScales.length) {
+      const c = yScales.reduce((a, b) => a + b) / yScales.length;
+      if (c > defY * 0.3 && c < defY * 3) calibScaleY = c;
+    }
   }
 
   function start() { running = true; }
@@ -1946,7 +2074,7 @@ const GazeEngine = (() => {
   }
   function getLatest() { return latest; }
 
-  return { init, startCalibration, start, stop, getLatest };
+  return { init, startMultiPointCalibration, start, stop, getLatest };
 })();
 
 window.GazeEngine = GazeEngine;
@@ -2044,10 +2172,14 @@ const AudioEngine = (() => {
         ? Math.min(100, (centroidBuf.stddev() / centroidMean) * 100)
         : 0;
 
-      // Calibrate silence threshold from first 5 ambient samples (before user speaks)
+      // Calibrate silence threshold from first 5 ambient samples.
+      // Use minimum (not average) × 2 so a loud window doesn't inflate the threshold
+      // and cause speech to register as silence. Hard cap at 0.02 — speech RMS is
+      // typically 0.05–0.3, so anything below 0.02 is genuinely quiet.
       if (ambientSamples.length < 5) {
         ambientSamples.push(rms);
-        silenceThreshold = Math.max(0.005, ambientSamples.reduce((a,b)=>a+b,0)/ambientSamples.length * 3);
+        const minAmbient = Math.min(...ambientSamples);
+        silenceThreshold = Math.max(0.005, Math.min(0.02, minAmbient * 2));
       }
       silenceWindows.push(rms < silenceThreshold);
       if (silenceWindows.length > 15) silenceWindows.shift();
@@ -2107,9 +2239,9 @@ window.SensorManager = {
   async init(videoElement, mediaStream) {
     await FaceEngine.init(videoElement);
     await GazeEngine.init(videoElement);
-    await AudioEngine.init(mediaStream); // pass shared mediaStream if available
+    await AudioEngine.init(mediaStream);
   },
-  startCalibration() { return GazeEngine.startCalibration(); },
+  startMultiPointCalibration(pts) { return GazeEngine.startMultiPointCalibration(pts); },
   start() { FaceEngine.start(); GazeEngine.start(); AudioEngine.start(); },
   stop()  { FaceEngine.stop();  GazeEngine.stop();  AudioEngine.stop();  },
 };
@@ -2665,11 +2797,8 @@ window.BrainManager = {
         const apiKey = document.getElementById('api-key-input')?.value?.trim();
         if (apiKey && window.ClaudeClient) ClaudeClient.setApiKey(apiKey);
 
-        // Init brain — this re-emits profile:selected with { id, config } for brain modules
-        if (window.BrainManager) {
-          BrainManager.init(id);
-          BrainManager.start(); // starts 100ms anomaly detection loop (30s calibration window built-in)
-        }
+        // Init brain (registers profile config on brain modules; start() deferred until sensors are live)
+        if (window.BrainManager) BrainManager.init(id);
 
         // Reset audio transcript and sensor state for new session
         if (window.AudioEngine) AudioEngine.reset();
@@ -2688,27 +2817,37 @@ window.BrainManager = {
             }
 
             await SensorManager.init(videoEl, mediaStream); // FaceEngine emits models:loaded when models finish
-            SensorManager.start();             // begin emitting signal:face / signal:gaze / signal:audio
+            SensorManager.start();
 
-            // Start gaze calibration after sensors are ready
-            // (GazeEngine shows its own calibration overlay)
-            if (window.SensorManager) {
-              try {
-                await SensorManager.startCalibration();
-              } catch (err) {
-                console.warn('[AppInit] Gaze calibration failed:', err);
-              }
+            // Start anomaly detection only after sensors are live
+            if (window.BrainManager) BrainManager.start();
+
+            // Signal canvas animation to switch from loading state to progress view
+            Bus.emit('gaze:ready', {});
+
+            // 9 points spread across the full viewport for accurate scale calibration.
+            // GazeEngine will show a full-screen overlay with a moveable dot.
+            const calibPts = [
+              {x:0.15,y:0.15},{x:0.5,y:0.15},{x:0.85,y:0.15},
+              {x:0.15,y:0.5 },{x:0.5,y:0.5 },{x:0.85,y:0.5 },
+              {x:0.15,y:0.85},{x:0.5,y:0.85},{x:0.85,y:0.85},
+            ];
+
+            try {
+              await SensorManager.startMultiPointCalibration(calibPts);
+            } catch (err) {
+              console.warn('[AppInit] Gaze calibration failed:', err);
+              Bus.emit('calibration:complete', { type: 'gaze' });
             }
           } catch (err) {
             console.warn('[AppInit] Permission denied or sensor init failed:', err);
-            // Show error to user
             const errMsg = err.name === 'NotAllowedError'
               ? 'Camera/microphone access denied. AdaptIQ needs these to function.'
               : 'Sensor initialization failed. Please refresh and try again.';
             if (window.AdaptIQ_UI) {
               window.AdaptIQ_UI.addEventLog('error', `<strong>Error:</strong> ${errMsg}`);
             }
-            Bus.emit('models:loaded', {}); // still advance UI so user can try again
+            Bus.emit('calibration:complete', { type: 'gaze' }); // advance UI so user is not stuck
           }
         }
       });
@@ -2716,7 +2855,11 @@ window.BrainManager = {
       // End session button
       document.getElementById('btn-end-session')?.addEventListener('click', () => {
         if (window.SensorManager) SensorManager.stop();
-        if (window.BrainManager)  BrainManager.endSession();
+        if (window.BrainManager) {
+          BrainManager.stop();      // stops AnomalyDetector — no more flags or popups
+          BrainManager.endSession();
+        }
+        if (window.InterventionDispatcher) InterventionDispatcher.reset();
       });
     })();
   </script>

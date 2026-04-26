@@ -12,7 +12,9 @@
       "Bash(git commit *)",
       "Bash(git reset *)",
       "Bash(git remote *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(python -m http.server 8080)",
+      "WebSearch"
     ]
   }
 }
