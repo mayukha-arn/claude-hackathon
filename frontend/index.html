@@ -1,0 +1,1584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AdaptIQ — Adaptive Learning Intelligence</title>
+
+  <!-- CDN Dependencies -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+  <script src="https://webgazer.cs.brown.edu/webgazer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/meyda/dist/web/meyda.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet">
+
+  <style>
+    /* =============================================
+       DESIGN TOKENS
+    ============================================= */
+    :root {
+      --bg-void:       #050810;
+      --bg-deep:       #080d1a;
+      --bg-panel:      #0c1425;
+      --bg-card:       #101c30;
+      --bg-card-hover: #152238;
+      --bg-glass:      rgba(16, 28, 48, 0.7);
+
+      --cyan:          #00e5ff;
+      --cyan-dim:      rgba(0, 229, 255, 0.15);
+      --cyan-glow:     rgba(0, 229, 255, 0.4);
+      --amber:         #ffb700;
+      --amber-dim:     rgba(255, 183, 0, 0.15);
+      --green:         #00ff88;
+      --green-dim:     rgba(0, 255, 136, 0.1);
+      --red:           #ff3d5a;
+      --red-dim:       rgba(255, 61, 90, 0.15);
+      --purple:        #a855f7;
+
+      --text-primary:  #e8f4ff;
+      --text-secondary:#8aa0bc;
+      --text-muted:    #445566;
+      --text-data:     #00e5ff;
+
+      --border:        rgba(0, 229, 255, 0.12);
+      --border-bright: rgba(0, 229, 255, 0.35);
+
+      --font-display:  'Syne', sans-serif;
+      --font-mono:     'JetBrains Mono', monospace;
+
+      --radius-sm:     4px;
+      --radius:        8px;
+      --radius-lg:     16px;
+
+      --transition:    200ms cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-slow: 500ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* =============================================
+       RESET & BASE
+    ============================================= */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 100%; height: 100%;
+      overflow: hidden;
+      background: var(--bg-void);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 14px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Animated grid background */
+    body::before {
+      content: '';
+      position: fixed; inset: 0; z-index: 0;
+      background-image:
+        linear-gradient(rgba(0,229,255,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,229,255,0.03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      animation: gridShift 20s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes gridShift {
+      0% { background-position: 0 0; }
+      100% { background-position: 48px 48px; }
+    }
+
+    /* Ambient glow orbs */
+    body::after {
+      content: '';
+      position: fixed; inset: 0; z-index: 0;
+      background:
+        radial-gradient(ellipse 600px 400px at 20% 80%, rgba(0,229,255,0.04) 0%, transparent 70%),
+        radial-gradient(ellipse 400px 600px at 80% 20%, rgba(168,85,247,0.04) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    /* =============================================
+       SCREEN SYSTEM
+    ============================================= */
+    .screen {
+      position: fixed; inset: 0; z-index: 10;
+      display: flex;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity var(--transition-slow);
+    }
+    .screen.active {
+      opacity: 1;
+      pointer-events: all;
+    }
+
+    /* =============================================
+       SHARED COMPONENTS
+    ============================================= */
+
+    /* Scanline overlay */
+    .scanlines {
+      position: fixed; inset: 0; z-index: 100;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.03) 2px,
+        rgba(0,0,0,0.03) 4px
+      );
+      pointer-events: none;
+    }
+
+    /* Glowing horizontal line decorations */
+    .h-rule {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+      opacity: 0.4;
+    }
+
+    /* Status pill */
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-size: 10px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+      border: 1px solid;
+    }
+    .status-pill.active  { color: var(--green);  border-color: var(--green);  background: var(--green-dim); }
+    .status-pill.warn    { color: var(--amber);  border-color: var(--amber);  background: var(--amber-dim); }
+    .status-pill.error   { color: var(--red);    border-color: var(--red);    background: var(--red-dim);   }
+    .status-pill.idle    { color: var(--text-secondary); border-color: var(--text-muted); background: transparent; }
+
+    .pulse-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+      animation: pulseDot 1.4s ease-in-out infinite;
+    }
+    @keyframes pulseDot {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.7); }
+    }
+
+    /* =============================================
+       SCREEN 1 — LOADING / BOOT
+    ============================================= */
+    #screen-loading {
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg-void);
+    }
+
+    .boot-logo {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      margin-bottom: 60px;
+    }
+    .boot-logo-mark {
+      position: relative;
+      width: 80px; height: 80px;
+    }
+    .boot-logo-mark svg {
+      width: 100%; height: 100%;
+      animation: rotateRing 6s linear infinite;
+    }
+    @keyframes rotateRing { to { transform: rotate(360deg); } }
+
+    .boot-logo-inner {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-family: var(--font-display); font-size: 22px; font-weight: 800;
+      color: var(--cyan);
+      text-shadow: 0 0 20px var(--cyan-glow);
+    }
+
+    .boot-title {
+      font-family: var(--font-display); font-size: 36px; font-weight: 800;
+      letter-spacing: -0.01em;
+      color: var(--text-primary);
+    }
+    .boot-subtitle {
+      font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    .boot-progress-wrap {
+      width: 360px;
+    }
+    .boot-progress-label {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 10px;
+      font-size: 11px; letter-spacing: 0.06em;
+      color: var(--text-secondary);
+    }
+    .boot-progress-label span:last-child { color: var(--cyan); }
+
+    .boot-progress-track {
+      height: 2px;
+      background: var(--bg-card);
+      border-radius: 2px;
+      overflow: hidden;
+      position: relative;
+    }
+    .boot-progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, var(--cyan), var(--purple));
+      border-radius: 2px;
+      width: 0%;
+      transition: width 300ms ease;
+      box-shadow: 0 0 12px var(--cyan-glow);
+    }
+
+    .boot-tasks {
+      margin-top: 32px;
+      width: 360px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .boot-task {
+      display: flex; align-items: center; gap: 10px;
+      font-size: 11px; letter-spacing: 0.04em;
+      color: var(--text-muted);
+      transition: color var(--transition);
+    }
+    .boot-task.done   { color: var(--text-secondary); }
+    .boot-task.active { color: var(--cyan); }
+    .boot-task-icon { width: 16px; text-align: center; }
+
+    /* =============================================
+       SCREEN 2 — PROFILE SELECTION
+    ============================================= */
+    #screen-profile {
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0;
+    }
+
+    .profile-header {
+      text-align: center;
+      margin-bottom: 56px;
+    }
+    .profile-header-eyebrow {
+      font-size: 10px; letter-spacing: 0.25em; text-transform: uppercase;
+      color: var(--cyan); margin-bottom: 12px;
+    }
+    .profile-header h1 {
+      font-family: var(--font-display); font-size: 42px; font-weight: 800;
+      line-height: 1.05;
+      color: var(--text-primary);
+    }
+    .profile-header p {
+      margin-top: 12px; font-size: 13px;
+      color: var(--text-secondary); letter-spacing: 0.02em;
+    }
+
+    .profile-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 300px);
+      gap: 20px;
+    }
+
+    .profile-card {
+      position: relative;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px 24px 24px;
+      cursor: pointer;
+      transition: all var(--transition);
+      overflow: hidden;
+    }
+    .profile-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--card-accent, var(--cyan)), transparent);
+      opacity: 0;
+      transition: opacity var(--transition);
+    }
+    .profile-card::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse 200px 150px at 50% 0%, var(--card-accent-dim, var(--cyan-dim)) 0%, transparent 70%);
+      opacity: 0;
+      transition: opacity var(--transition);
+      pointer-events: none;
+    }
+    .profile-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-bright);
+      transform: translateY(-3px);
+      box-shadow: 0 20px 40px rgba(0,0,0,0.4), 0 0 0 1px var(--border-bright);
+    }
+    .profile-card:hover::before { opacity: 1; }
+    .profile-card:hover::after  { opacity: 1; }
+
+    .profile-card[data-id="adhd"]    { --card-accent: var(--cyan);   --card-accent-dim: var(--cyan-dim);  }
+    .profile-card[data-id="anxiety"] { --card-accent: var(--amber);  --card-accent-dim: var(--amber-dim); }
+    .profile-card[data-id="asd"]     { --card-accent: var(--purple); --card-accent-dim: rgba(168,85,247,0.1); }
+
+    .profile-card-tag {
+      font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--card-accent, var(--cyan));
+      margin-bottom: 16px;
+      display: flex; align-items: center; gap: 6px;
+    }
+    .profile-card-tag::before {
+      content: '';
+      display: block; width: 16px; height: 1px;
+      background: currentColor;
+    }
+
+    .profile-card h3 {
+      font-family: var(--font-display); font-size: 22px; font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+    .profile-card p {
+      font-size: 12px; line-height: 1.6;
+      color: var(--text-secondary);
+      margin-bottom: 20px;
+    }
+
+    .profile-card-traits {
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .profile-trait {
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 10px; letter-spacing: 0.06em;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      color: var(--text-secondary);
+    }
+
+    .profile-card-arrow {
+      position: absolute; bottom: 24px; right: 24px;
+      font-size: 18px; color: var(--card-accent, var(--cyan));
+      opacity: 0; transform: translateX(-6px);
+      transition: all var(--transition);
+    }
+    .profile-card:hover .profile-card-arrow { opacity: 1; transform: translateX(0); }
+
+    /* =============================================
+       SCREEN 3 — CALIBRATION
+    ============================================= */
+    #screen-calibration {
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 40px;
+    }
+
+    .calib-header { text-align: center; }
+    .calib-header h2 {
+      font-family: var(--font-display); font-size: 28px; font-weight: 700;
+      color: var(--text-primary);
+    }
+    .calib-header p { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+
+    .calib-stages {
+      display: flex; gap: 12px; align-items: center;
+    }
+    .calib-stage {
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+      position: relative;
+    }
+    .calib-stage + .calib-stage::before {
+      content: '';
+      position: absolute; right: 100%; top: 18px;
+      width: 12px; height: 1px;
+      background: var(--border);
+      transform: translateX(-50%);
+    }
+    .calib-stage-dot {
+      width: 36px; height: 36px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      border: 2px solid var(--border);
+      font-size: 12px; font-weight: 600;
+      color: var(--text-muted);
+      background: var(--bg-panel);
+      transition: all var(--transition-slow);
+    }
+    .calib-stage.done .calib-stage-dot {
+      border-color: var(--green); color: var(--green);
+      background: var(--green-dim);
+    }
+    .calib-stage.active .calib-stage-dot {
+      border-color: var(--cyan); color: var(--cyan);
+      background: var(--cyan-dim);
+      box-shadow: 0 0 20px var(--cyan-glow);
+      animation: stagePulse 1.5s ease-in-out infinite;
+    }
+    @keyframes stagePulse {
+      0%, 100% { box-shadow: 0 0 10px var(--cyan-glow); }
+      50%       { box-shadow: 0 0 30px var(--cyan-glow), 0 0 60px rgba(0,229,255,0.15); }
+    }
+    .calib-stage-label { font-size: 10px; color: var(--text-muted); letter-spacing: 0.06em; }
+    .calib-stage.done  .calib-stage-label  { color: var(--green); }
+    .calib-stage.active .calib-stage-label { color: var(--cyan); }
+
+    /* Calibration animation canvas area */
+    .calib-canvas-wrap {
+      position: relative;
+      width: 560px; height: 320px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+    .calib-canvas-wrap::before {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse 400px 200px at 50% 50%, var(--cyan-dim) 0%, transparent 70%);
+    }
+    #calib-canvas { width: 100%; height: 100%; }
+
+    .calib-instruction {
+      font-size: 13px; color: var(--text-secondary);
+      text-align: center; letter-spacing: 0.04em;
+    }
+    .calib-instruction strong { color: var(--cyan); }
+
+    /* =============================================
+       SCREEN 4 — MAIN DASHBOARD
+    ============================================= */
+    #screen-dashboard {
+      flex-direction: column;
+    }
+
+    /* Top bar */
+    .topbar {
+      position: relative; z-index: 20;
+      height: 56px;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 24px;
+      background: var(--bg-glass);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    .topbar-left {
+      display: flex; align-items: center; gap: 20px;
+    }
+    .topbar-logo {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .topbar-logo-mark {
+      width: 32px; height: 32px;
+    }
+    .topbar-logo-mark svg { width: 100%; height: 100%; }
+    .topbar-logo-name {
+      font-family: var(--font-display); font-size: 18px; font-weight: 800;
+      color: var(--text-primary); letter-spacing: -0.01em;
+    }
+    .topbar-logo-name span { color: var(--cyan); }
+
+    .topbar-divider {
+      width: 1px; height: 24px;
+      background: var(--border);
+    }
+
+    .topbar-profile-chip {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 12px 4px 8px;
+      background: var(--cyan-dim);
+      border: 1px solid rgba(0,229,255,0.2);
+      border-radius: 20px;
+      font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+      color: var(--cyan);
+    }
+    .topbar-profile-chip-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--cyan);
+      box-shadow: 0 0 8px var(--cyan-glow);
+    }
+
+    .topbar-center {
+      position: absolute; left: 50%; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 24px;
+    }
+    .topbar-timer {
+      font-size: 22px; font-weight: 500; letter-spacing: 0.05em;
+      color: var(--text-primary);
+    }
+    .topbar-timer-label { font-size: 9px; color: var(--text-muted); text-align: center; letter-spacing: 0.1em; }
+
+    .topbar-right {
+      display: flex; align-items: center; gap: 16px;
+    }
+
+    .topbar-btn {
+      display: flex; align-items: center; gap: 6px;
+      padding: 6px 14px;
+      border-radius: var(--radius-sm);
+      border: 1px solid;
+      font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase;
+      cursor: pointer; transition: all var(--transition);
+      background: transparent;
+    }
+    .topbar-btn.end-session {
+      border-color: rgba(255,61,90,0.4);
+      color: var(--red);
+    }
+    .topbar-btn.end-session:hover {
+      background: var(--red-dim);
+      border-color: var(--red);
+    }
+
+    /* Dashboard layout */
+    .dash-body {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 280px 1fr 280px;
+      grid-template-rows: 1fr;
+      gap: 0;
+      overflow: hidden;
+    }
+
+    /* Left panel */
+    .dash-left {
+      display: flex; flex-direction: column;
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 16px;
+      gap: 12px;
+    }
+
+    /* Center panel */
+    .dash-center {
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Right panel */
+    .dash-right {
+      display: flex; flex-direction: column;
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 16px;
+      gap: 12px;
+    }
+
+    /* Scrollbar styling */
+    .dash-left::-webkit-scrollbar,
+    .dash-right::-webkit-scrollbar { width: 4px; }
+    .dash-left::-webkit-scrollbar-track,
+    .dash-right::-webkit-scrollbar-track { background: transparent; }
+    .dash-left::-webkit-scrollbar-thumb,
+    .dash-right::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* Panel section headers */
+    .panel-section-label {
+      font-size: 9px; letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--text-muted);
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 4px;
+    }
+
+    /* =============================================
+       METRIC CARDS (left/right panels)
+    ============================================= */
+    .metric-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0;
+      width: 3px; height: 100%;
+      background: var(--metric-color, var(--cyan));
+      border-radius: 2px 0 0 2px;
+      opacity: 0.7;
+    }
+
+    .metric-card-header {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 10px;
+    }
+    .metric-card-name {
+      font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+      color: var(--text-muted);
+    }
+    .metric-card-badge {
+      font-size: 9px; padding: 2px 6px;
+      border-radius: 3px;
+      border: 1px solid var(--metric-color, var(--cyan));
+      color: var(--metric-color, var(--cyan));
+      background: var(--metric-color-dim, var(--cyan-dim));
+    }
+
+    .metric-card-value {
+      font-size: 28px; font-weight: 500; letter-spacing: -0.02em;
+      color: var(--metric-color, var(--cyan));
+      text-shadow: 0 0 20px var(--metric-glow, var(--cyan-glow));
+      line-height: 1;
+      margin-bottom: 4px;
+      transition: all var(--transition);
+    }
+    .metric-card-unit {
+      font-size: 11px; color: var(--text-muted);
+      margin-left: 3px;
+    }
+    .metric-card-label {
+      font-size: 10px; color: var(--text-secondary);
+      margin-bottom: 10px;
+    }
+
+    /* Sparkline */
+    .metric-sparkline {
+      height: 36px;
+      position: relative;
+    }
+    .metric-sparkline canvas { width: 100% !important; height: 100% !important; }
+
+    /* Bar gauge */
+    .metric-bar {
+      height: 4px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 2px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .metric-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--metric-color, var(--cyan)), var(--metric-color-alt, var(--purple)));
+      border-radius: 2px;
+      transition: width 600ms cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 0 8px var(--metric-glow, var(--cyan-glow));
+    }
+
+    /* =============================================
+       SCORE RING SECTION
+    ============================================= */
+    .scores-section {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      gap: 16px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+
+    .score-ring-wrap {
+      position: relative;
+      width: 100px; height: 100px;
+      flex-shrink: 0;
+    }
+    #score-ring-canvas { width: 100%; height: 100%; }
+    .score-ring-inner {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+    }
+    .score-ring-value {
+      font-size: 28px; font-weight: 500;
+      color: var(--text-primary); letter-spacing: -0.02em;
+    }
+    .score-ring-grade {
+      font-size: 11px; color: var(--cyan); font-weight: 600;
+    }
+
+    .score-breakdown {
+      flex: 1;
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .score-item {
+      display: flex; flex-direction: column; gap: 4px;
+    }
+    .score-item-header {
+      display: flex; justify-content: space-between;
+      font-size: 10px; color: var(--text-secondary);
+    }
+    .score-item-val { font-weight: 500; color: var(--text-primary); }
+    .score-item-bar {
+      height: 3px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 2px; overflow: hidden;
+    }
+    .score-item-bar-fill {
+      height: 100%;
+      background: var(--cyan);
+      transition: width 600ms ease;
+    }
+
+    /* =============================================
+       VIDEO FEED AREA (center)
+    ============================================= */
+    .video-container {
+      flex: 1;
+      position: relative;
+      background: #000;
+      overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    #video-feed {
+      width: 100%; height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    /* Face overlay canvas */
+    #face-overlay-canvas {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+      transform: scaleX(-1);
+    }
+
+    /* Gaze tracker dot */
+    #gaze-dot {
+      position: fixed;
+      width: 16px; height: 16px;
+      margin: -8px 0 0 -8px;
+      border-radius: 50%;
+      border: 2px solid var(--cyan);
+      background: rgba(0,229,255,0.3);
+      box-shadow: 0 0 16px var(--cyan-glow);
+      pointer-events: none;
+      z-index: 200;
+      transition: left 60ms linear, top 60ms linear;
+      display: none;
+    }
+
+    /* Corner brackets for video */
+    .video-bracket {
+      position: absolute;
+      width: 24px; height: 24px;
+      border-color: var(--cyan);
+      border-style: solid;
+      opacity: 0.6;
+      pointer-events: none;
+      z-index: 5;
+    }
+    .video-bracket.tl { top: 16px; left: 16px; border-width: 2px 0 0 2px; }
+    .video-bracket.tr { top: 16px; right: 16px; border-width: 2px 2px 0 0; }
+    .video-bracket.bl { bottom: 16px; left: 16px; border-width: 0 0 2px 2px; }
+    .video-bracket.br { bottom: 16px; right: 16px; border-width: 0 2px 2px 0; }
+
+    /* Video status badge */
+    .video-status-badge {
+      position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+      z-index: 10;
+    }
+
+    /* =============================================
+       FLAG / ALERT OVERLAY
+    ============================================= */
+    #flag-overlay {
+      position: fixed;
+      top: 72px; left: 50%; transform: translateX(-50%);
+      z-index: 300;
+      display: flex; flex-direction: column; gap: 8px;
+      align-items: center;
+      pointer-events: none;
+      width: 500px;
+    }
+
+    .flag-toast {
+      width: 100%;
+      display: flex; align-items: flex-start; gap: 12px;
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      border: 1px solid;
+      background: var(--bg-glass);
+      backdrop-filter: blur(16px);
+      animation: flagIn 300ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    @keyframes flagIn {
+      from { opacity: 0; transform: translateY(-12px) scale(0.95); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .flag-toast.severity-high   { border-color: var(--red);   }
+    .flag-toast.severity-medium { border-color: var(--amber); }
+    .flag-toast.severity-low    { border-color: var(--cyan);  }
+
+    .flag-icon {
+      font-size: 18px;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .flag-content { flex: 1; }
+    .flag-type {
+      font-size: 9px; letter-spacing: 0.15em; text-transform: uppercase;
+      margin-bottom: 2px;
+    }
+    .flag-toast.severity-high   .flag-type { color: var(--red);   }
+    .flag-toast.severity-medium .flag-type { color: var(--amber); }
+    .flag-toast.severity-low    .flag-type { color: var(--cyan);  }
+    .flag-message { font-size: 12px; color: var(--text-secondary); line-height: 1.4; }
+
+    /* =============================================
+       INTERVENTION OVERLAY
+    ============================================= */
+    #intervention-overlay {
+      position: fixed; inset: 0; z-index: 400;
+      background: rgba(5, 8, 16, 0.88);
+      backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; pointer-events: none;
+      transition: opacity var(--transition-slow);
+    }
+    #intervention-overlay.active {
+      opacity: 1; pointer-events: all;
+    }
+
+    .intervention-card {
+      width: 560px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border-bright);
+      border-radius: var(--radius-lg);
+      padding: 40px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 40px 80px rgba(0,0,0,0.6), 0 0 0 1px var(--border-bright);
+    }
+    .intervention-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--intervention-color, var(--cyan)), transparent);
+    }
+    .intervention-card::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: radial-gradient(ellipse 400px 200px at 50% 0%, var(--intervention-glow, var(--cyan-dim)) 0%, transparent 60%);
+      pointer-events: none;
+    }
+
+    .intervention-eyebrow {
+      font-size: 9px; letter-spacing: 0.2em; text-transform: uppercase;
+      color: var(--intervention-color, var(--cyan));
+      margin-bottom: 16px;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .intervention-eyebrow::after {
+      content: '';
+      flex: 1; height: 1px;
+      background: linear-gradient(90deg, var(--intervention-color, var(--cyan)), transparent);
+      opacity: 0.3;
+    }
+
+    .intervention-title {
+      font-family: var(--font-display); font-size: 26px; font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 16px;
+    }
+
+    .intervention-content {
+      font-size: 14px; line-height: 1.8;
+      color: var(--text-secondary);
+      margin-bottom: 28px;
+      min-height: 60px;
+    }
+
+    .intervention-progress {
+      height: 3px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .intervention-progress-bar {
+      height: 100%;
+      background: var(--intervention-color, var(--cyan));
+      border-radius: 2px;
+      width: 100%;
+      transition: width linear;
+      box-shadow: 0 0 8px var(--intervention-glow, var(--cyan-glow));
+    }
+
+    .intervention-dismiss {
+      position: absolute; top: 16px; right: 16px;
+      width: 28px; height: 28px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      font-size: 14px; color: var(--text-muted);
+      cursor: pointer;
+      background: transparent;
+      font-family: var(--font-mono);
+      transition: all var(--transition);
+      z-index: 1;
+    }
+    .intervention-dismiss:hover {
+      border-color: var(--text-secondary);
+      color: var(--text-primary);
+    }
+
+    /* =============================================
+       EVENT LOG (right panel)
+    ============================================= */
+    .event-log {
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .event-log-item {
+      display: flex; gap: 8px; align-items: flex-start;
+      padding: 8px 10px;
+      background: var(--bg-deep);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      animation: eventIn 300ms ease forwards;
+    }
+    @keyframes eventIn {
+      from { opacity: 0; transform: translateX(8px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    .event-log-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      margin-top: 4px; flex-shrink: 0;
+    }
+    .event-log-dot.flag  { background: var(--red); box-shadow: 0 0 6px var(--red); }
+    .event-log-dot.info  { background: var(--cyan); box-shadow: 0 0 6px var(--cyan-glow); }
+    .event-log-dot.score { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+    .event-log-dot.intervention { background: var(--purple); }
+
+    .event-log-text {
+      flex: 1;
+      font-size: 10px; line-height: 1.5;
+      color: var(--text-secondary);
+    }
+    .event-log-text strong { color: var(--text-primary); font-weight: 500; }
+    .event-log-time {
+      font-size: 9px; color: var(--text-muted);
+      flex-shrink: 0; margin-top: 2px;
+    }
+
+    /* =============================================
+       SESSION SUMMARY SCREEN
+    ============================================= */
+    #screen-summary {
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      overflow-y: auto;
+    }
+
+    .summary-card {
+      width: 100%;
+      max-width: 760px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    .summary-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+    }
+
+    .summary-header {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      margin-bottom: 36px;
+      padding-bottom: 28px;
+      border-bottom: 1px solid var(--border);
+    }
+    .summary-header-left h2 {
+      font-family: var(--font-display); font-size: 32px; font-weight: 800;
+      color: var(--text-primary);
+    }
+    .summary-header-left p { font-size: 12px; color: var(--text-secondary); margin-top: 6px; }
+
+    .summary-grade-badge {
+      display: flex; flex-direction: column; align-items: center;
+      padding: 16px 24px;
+      background: var(--cyan-dim);
+      border: 1px solid rgba(0,229,255,0.3);
+      border-radius: var(--radius);
+    }
+    .summary-grade-letter {
+      font-family: var(--font-display); font-size: 48px; font-weight: 800;
+      color: var(--cyan); line-height: 1;
+    }
+    .summary-grade-label { font-size: 9px; letter-spacing: 0.15em; color: var(--text-secondary); margin-top: 4px; }
+
+    .summary-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .summary-stat {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      text-align: center;
+    }
+    .summary-stat-value {
+      font-size: 28px; font-weight: 500;
+      color: var(--cyan);
+      margin-bottom: 4px;
+    }
+    .summary-stat-label {
+      font-size: 9px; letter-spacing: 0.12em; text-transform: uppercase;
+      color: var(--text-muted);
+    }
+
+    .summary-actions {
+      display: flex; gap: 12px; justify-content: center;
+      margin-top: 32px;
+    }
+    .btn-primary, .btn-secondary {
+      padding: 10px 28px;
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono); font-size: 12px;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      cursor: pointer; transition: all var(--transition);
+      border: 1px solid;
+    }
+    .btn-primary {
+      background: var(--cyan); border-color: var(--cyan);
+      color: var(--bg-void);
+    }
+    .btn-primary:hover { box-shadow: 0 0 24px var(--cyan-glow); }
+    .btn-secondary {
+      background: transparent; border-color: var(--border-bright);
+      color: var(--text-secondary);
+    }
+    .btn-secondary:hover { border-color: var(--text-secondary); color: var(--text-primary); }
+
+    /* =============================================
+       UTILITY / HELPERS
+    ============================================= */
+    .hidden { display: none !important; }
+
+    /* Number counter animation */
+    @keyframes countUp {
+      from { opacity: 0; transform: translateY(4px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .value-update { animation: countUp 200ms ease forwards; }
+
+    /* Loading shimmer */
+    @keyframes shimmer {
+      0%   { background-position: -400px 0; }
+      100% { background-position: 400px 0; }
+    }
+    .shimmer {
+      background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-card-hover) 50%, var(--bg-card) 75%);
+      background-size: 800px 100%;
+      animation: shimmer 1.5s infinite;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Scanlines overlay -->
+  <div class="scanlines"></div>
+
+  <!-- ==========================================
+       SCREEN 1: LOADING / BOOT
+  =========================================== -->
+  <div id="screen-loading" class="screen active">
+    <div class="boot-logo">
+      <div class="boot-logo-mark">
+        <svg viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="40" cy="40" r="36" stroke="rgba(0,229,255,0.2)" stroke-width="1.5"/>
+          <circle cx="40" cy="40" r="36" stroke="url(#bootGrad)" stroke-width="1.5"
+            stroke-dasharray="60 166" stroke-linecap="round"/>
+          <circle cx="40" cy="40" r="28" stroke="rgba(0,229,255,0.08)" stroke-width="1"/>
+          <defs>
+            <linearGradient id="bootGrad" x1="0" y1="0" x2="80" y2="80" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#00e5ff"/>
+              <stop offset="100%" stop-color="#a855f7"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <div class="boot-logo-inner">AQ</div>
+      </div>
+      <div>
+        <div class="boot-title">AdaptIQ</div>
+        <div class="boot-subtitle">Adaptive Learning Intelligence</div>
+      </div>
+    </div>
+
+    <div class="boot-progress-wrap">
+      <div class="boot-progress-label">
+        <span id="boot-task-label">Initializing systems…</span>
+        <span id="boot-pct">0%</span>
+      </div>
+      <div class="boot-progress-track">
+        <div class="boot-progress-bar" id="boot-progress-bar"></div>
+      </div>
+
+      <div class="boot-tasks" id="boot-tasks">
+        <div class="boot-task" id="task-models">
+          <span class="boot-task-icon">○</span>
+          <span>Loading AI models</span>
+        </div>
+        <div class="boot-task" id="task-camera">
+          <span class="boot-task-icon">○</span>
+          <span>Requesting camera access</span>
+        </div>
+        <div class="boot-task" id="task-audio">
+          <span class="boot-task-icon">○</span>
+          <span>Initializing audio analysis</span>
+        </div>
+        <div class="boot-task" id="task-gaze">
+          <span class="boot-task-icon">○</span>
+          <span>Calibrating gaze tracking</span>
+        </div>
+        <div class="boot-task" id="task-ready">
+          <span class="boot-task-icon">○</span>
+          <span>Ready</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       SCREEN 2: PROFILE SELECTION
+  =========================================== -->
+  <div id="screen-profile" class="screen">
+    <div class="profile-header">
+      <div class="profile-header-eyebrow">Step 1 of 2 — Select Learning Profile</div>
+      <h1>Who are we<br>adapting for?</h1>
+      <p>Choose the profile that best matches the learner's needs.<br>AdaptIQ will tailor all interventions and sensitivity thresholds accordingly.</p>
+    </div>
+
+    <div class="profile-grid">
+      <div class="profile-card" data-id="adhd">
+        <div class="profile-card-tag">Attention</div>
+        <h3>ADHD</h3>
+        <p>High-energy, dynamic interventions. Frequent micro-breaks, gamification cues, and engagement spikes to maintain focus.</p>
+        <div class="profile-card-traits">
+          <span class="profile-trait">Short bursts</span>
+          <span class="profile-trait">High stimulation</span>
+          <span class="profile-trait">Reward loops</span>
+          <span class="profile-trait">Movement cues</span>
+        </div>
+        <div class="profile-card-arrow">→</div>
+      </div>
+
+      <div class="profile-card" data-id="anxiety">
+        <div class="profile-card-tag">Regulation</div>
+        <h3>Anxiety</h3>
+        <p>Calm, predictable pacing. Breathing prompts, reduced visual noise, and reassuring check-ins during high-stress signals.</p>
+        <div class="profile-card-traits">
+          <span class="profile-trait">Gentle pace</span>
+          <span class="profile-trait">Breathing cues</span>
+          <span class="profile-trait">Low stimulation</span>
+          <span class="profile-trait">Safe spaces</span>
+        </div>
+        <div class="profile-card-arrow">→</div>
+      </div>
+
+      <div class="profile-card" data-id="asd">
+        <div class="profile-card-tag">Structure</div>
+        <h3>ASD</h3>
+        <p>Consistent structure with clear transitions. Routine reinforcement, predictable layouts, and explicit progress markers.</p>
+        <div class="profile-card-traits">
+          <span class="profile-trait">Routine</span>
+          <span class="profile-trait">Explicit cues</span>
+          <span class="profile-trait">Clear structure</span>
+          <span class="profile-trait">Predictability</span>
+        </div>
+        <div class="profile-card-arrow">→</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       SCREEN 3: CALIBRATION
+  =========================================== -->
+  <div id="screen-calibration" class="screen">
+    <div class="calib-header">
+      <h2>System Calibration</h2>
+      <p>Calibrating biometric sensors for accurate monitoring</p>
+    </div>
+
+    <div class="calib-stages">
+      <div class="calib-stage" id="calib-stage-face">
+        <div class="calib-stage-dot">01</div>
+        <div class="calib-stage-label">Face</div>
+      </div>
+      <div class="calib-stage" id="calib-stage-gaze">
+        <div class="calib-stage-dot">02</div>
+        <div class="calib-stage-label">Gaze</div>
+      </div>
+      <div class="calib-stage" id="calib-stage-audio">
+        <div class="calib-stage-dot">03</div>
+        <div class="calib-stage-label">Audio</div>
+      </div>
+    </div>
+
+    <div class="calib-canvas-wrap">
+      <canvas id="calib-canvas"></canvas>
+    </div>
+
+    <div class="calib-instruction" id="calib-instruction">
+      <strong>Look directly at the camera</strong> and stay still for a moment
+    </div>
+  </div>
+
+  <!-- ==========================================
+       SCREEN 4: MAIN DASHBOARD
+  =========================================== -->
+  <div id="screen-dashboard" class="screen">
+
+    <!-- TOP BAR -->
+    <div class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-logo">
+          <div class="topbar-logo-mark">
+            <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="16" cy="16" r="14" stroke="rgba(0,229,255,0.3)" stroke-width="1"/>
+              <circle cx="16" cy="16" r="14" stroke="url(#tbGrad)" stroke-width="1.5"
+                stroke-dasharray="24 64" stroke-linecap="round"/>
+              <text x="16" y="20" text-anchor="middle" fill="#00e5ff"
+                font-family="Syne,sans-serif" font-size="10" font-weight="800">AQ</text>
+              <defs>
+                <linearGradient id="tbGrad" x1="0" y1="0" x2="32" y2="32">
+                  <stop offset="0%" stop-color="#00e5ff"/>
+                  <stop offset="100%" stop-color="#a855f7"/>
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
+          <div class="topbar-logo-name">Adapt<span>IQ</span></div>
+        </div>
+        <div class="topbar-divider"></div>
+        <div class="topbar-profile-chip">
+          <div class="topbar-profile-chip-dot"></div>
+          <span id="topbar-profile-label">ADHD</span>
+        </div>
+      </div>
+
+      <div class="topbar-center">
+        <div>
+          <div class="topbar-timer" id="session-timer">00:00</div>
+          <div class="topbar-timer-label">SESSION TIME</div>
+        </div>
+      </div>
+
+      <div class="topbar-right">
+        <div class="status-pill active" id="session-status">
+          <div class="pulse-dot"></div>
+          <span>Monitoring</span>
+        </div>
+        <button class="topbar-btn end-session" id="btn-end-session">End Session</button>
+      </div>
+    </div>
+
+    <!-- DASHBOARD BODY -->
+    <div class="dash-body">
+
+      <!-- LEFT PANEL: Biometric signals -->
+      <div class="dash-left">
+        <div class="panel-section-label">Biometric Signals</div>
+
+        <!-- Eye Tracking -->
+        <div class="metric-card" style="--metric-color: var(--cyan); --metric-glow: var(--cyan-glow); --metric-color-dim: var(--cyan-dim);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Gaze Deviation</div>
+            <div class="metric-card-badge" id="gds-badge">GDS</div>
+          </div>
+          <div class="metric-card-value" id="metric-gds">0.00<span class="metric-card-unit">σ</span></div>
+          <div class="metric-card-label">Screen gaze stability</div>
+          <div class="metric-sparkline"><canvas id="spark-gds"></canvas></div>
+        </div>
+
+        <!-- Head Pose -->
+        <div class="metric-card" style="--metric-color: var(--amber); --metric-glow: rgba(255,183,0,0.4); --metric-color-dim: var(--amber-dim); --metric-color-alt: var(--cyan);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Head Pose Drift</div>
+            <div class="metric-card-badge" style="border-color: var(--amber); color: var(--amber); background: var(--amber-dim);">HPD</div>
+          </div>
+          <div class="metric-card-value" style="color: var(--amber); text-shadow: 0 0 20px rgba(255,183,0,0.4);" id="metric-hpd">0.0<span class="metric-card-unit">°</span></div>
+          <div class="metric-card-label">Head orientation variance</div>
+          <div class="metric-sparkline"><canvas id="spark-hpd"></canvas></div>
+        </div>
+
+        <!-- Blink Rate -->
+        <div class="metric-card" style="--metric-color: var(--green); --metric-glow: rgba(0,255,136,0.4); --metric-color-dim: var(--green-dim);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Blink Rate Analysis</div>
+            <div class="metric-card-badge" style="border-color: var(--green); color: var(--green); background: var(--green-dim);">BRA</div>
+          </div>
+          <div class="metric-card-value" style="color: var(--green); text-shadow: 0 0 20px rgba(0,255,136,0.4);" id="metric-bra">0<span class="metric-card-unit">/min</span></div>
+          <div class="metric-card-label">Blink frequency</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="bar-bra" style="--metric-color: var(--green); --metric-color-alt: var(--cyan); --metric-glow: rgba(0,255,136,0.4); width: 0%;"></div></div>
+        </div>
+
+        <div class="panel-section-label" style="margin-top: 4px;">Audio Analysis</div>
+
+        <!-- Vocal Energy -->
+        <div class="metric-card" style="--metric-color: var(--purple); --metric-glow: rgba(168,85,247,0.4); --metric-color-dim: rgba(168,85,247,0.1);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Vocal Energy Spread</div>
+            <div class="metric-card-badge" style="border-color: var(--purple); color: var(--purple); background: rgba(168,85,247,0.1);">VES</div>
+          </div>
+          <div class="metric-card-value" style="color: var(--purple); text-shadow: 0 0 20px rgba(168,85,247,0.4);" id="metric-ves">0.00</div>
+          <div class="metric-card-label">Spectral energy distribution</div>
+          <div class="metric-sparkline"><canvas id="spark-ves"></canvas></div>
+        </div>
+
+        <!-- Speech Rate -->
+        <div class="metric-card" style="--metric-color: #ff6b9d; --metric-glow: rgba(255,107,157,0.4); --metric-color-dim: rgba(255,107,157,0.1); --metric-color-alt: var(--amber);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Speech Rate</div>
+            <div class="metric-card-badge" style="border-color: #ff6b9d; color: #ff6b9d; background: rgba(255,107,157,0.1);">SR</div>
+          </div>
+          <div class="metric-card-value" style="color: #ff6b9d; text-shadow: 0 0 20px rgba(255,107,157,0.4);" id="metric-sr">0<span class="metric-card-unit">wpm</span></div>
+          <div class="metric-card-label">Words per minute estimate</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="bar-sr" style="--metric-color: #ff6b9d; --metric-color-alt: var(--amber); --metric-glow: rgba(255,107,157,0.4); width: 0%;"></div></div>
+        </div>
+      </div>
+
+      <!-- CENTER: Video feed -->
+      <div class="dash-center">
+        <!-- Score section -->
+        <div class="scores-section">
+          <div class="score-ring-wrap">
+            <canvas id="score-ring-canvas" width="100" height="100"></canvas>
+            <div class="score-ring-inner">
+              <div class="score-ring-value" id="score-overall">--</div>
+              <div class="score-ring-grade" id="score-grade">—</div>
+            </div>
+          </div>
+
+          <div class="score-breakdown">
+            <div class="score-item">
+              <div class="score-item-header">
+                <span>Eye Contact</span>
+                <span class="score-item-val" id="score-eye">0</span>
+              </div>
+              <div class="score-item-bar"><div class="score-item-bar-fill" id="sbar-eye" style="width:0%"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-item-header">
+                <span>Head Stability</span>
+                <span class="score-item-val" id="score-head">0</span>
+              </div>
+              <div class="score-item-bar"><div class="score-item-bar-fill" id="sbar-head" style="width:0%; background: var(--amber);"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-item-header">
+                <span>Vocal Confidence</span>
+                <span class="score-item-val" id="score-vocal">0</span>
+              </div>
+              <div class="score-item-bar"><div class="score-item-bar-fill" id="sbar-vocal" style="width:0%; background: var(--purple);"></div></div>
+            </div>
+            <div class="score-item">
+              <div class="score-item-header">
+                <span>Speech Clarity</span>
+                <span class="score-item-val" id="score-clarity">0</span>
+              </div>
+              <div class="score-item-bar"><div class="score-item-bar-fill" id="sbar-clarity" style="width:0%; background: #ff6b9d;"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Video feed -->
+        <div class="video-container">
+          <video id="video-feed" autoplay muted playsinline></video>
+          <canvas id="face-overlay-canvas"></canvas>
+
+          <div class="video-bracket tl"></div>
+          <div class="video-bracket tr"></div>
+          <div class="video-bracket bl"></div>
+          <div class="video-bracket br"></div>
+
+          <div class="video-status-badge">
+            <div class="status-pill active" id="video-status">
+              <div class="pulse-dot"></div>
+              <span>Face Detected</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT PANEL: Secondary metrics + log -->
+      <div class="dash-right">
+        <div class="panel-section-label">Derived Scores</div>
+
+        <!-- OSR -->
+        <div class="metric-card" style="--metric-color: #00d4aa; --metric-glow: rgba(0,212,170,0.4); --metric-color-dim: rgba(0,212,170,0.1); --metric-color-alt: var(--cyan);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Off-Screen Ratio</div>
+            <div class="metric-card-badge" style="border-color:#00d4aa; color:#00d4aa; background:rgba(0,212,170,0.1);">OSR</div>
+          </div>
+          <div class="metric-card-value" style="color:#00d4aa; text-shadow: 0 0 20px rgba(0,212,170,0.4);" id="metric-osr">0.0<span class="metric-card-unit">%</span></div>
+          <div class="metric-card-label">Time gaze off screen</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="bar-osr" style="--metric-color:#00d4aa; --metric-color-alt:var(--cyan); --metric-glow:rgba(0,212,170,0.4); width:0%;"></div></div>
+        </div>
+
+        <!-- ET -->
+        <div class="metric-card" style="--metric-color: var(--cyan); --metric-glow: var(--cyan-glow); --metric-color-dim: var(--cyan-dim);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Engagement Time</div>
+            <div class="metric-card-badge">ET</div>
+          </div>
+          <div class="metric-card-value" id="metric-et">0<span class="metric-card-unit">s</span></div>
+          <div class="metric-card-label">Cumulative engaged seconds</div>
+        </div>
+
+        <!-- CES -->
+        <div class="metric-card" style="--metric-color: var(--amber); --metric-glow: rgba(255,183,0,0.4); --metric-color-dim: var(--amber-dim); --metric-color-alt: var(--red);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Cognitive Engine Score</div>
+            <div class="metric-card-badge" style="border-color: var(--amber); color: var(--amber); background: var(--amber-dim);">CES</div>
+          </div>
+          <div class="metric-card-value" style="color: var(--amber); text-shadow: 0 0 20px rgba(255,183,0,0.4);" id="metric-ces">0.0</div>
+          <div class="metric-card-label">Combined cognitive load estimate</div>
+          <div class="metric-sparkline"><canvas id="spark-ces"></canvas></div>
+        </div>
+
+        <!-- SILR -->
+        <div class="metric-card" style="--metric-color: #00b4d8; --metric-glow: rgba(0,180,216,0.4); --metric-color-dim: rgba(0,180,216,0.1); --metric-color-alt: var(--purple);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Silence/Latency Ratio</div>
+            <div class="metric-card-badge" style="border-color:#00b4d8; color:#00b4d8; background:rgba(0,180,216,0.1);">SILR</div>
+          </div>
+          <div class="metric-card-value" style="color:#00b4d8; text-shadow:0 0 20px rgba(0,180,216,0.4);" id="metric-silr">0.00</div>
+          <div class="metric-card-label">Pause-to-speech ratio</div>
+          <div class="metric-sparkline"><canvas id="spark-silr"></canvas></div>
+        </div>
+
+        <!-- PVS -->
+        <div class="metric-card" style="--metric-color: var(--green); --metric-glow: rgba(0,255,136,0.4); --metric-color-dim: var(--green-dim);">
+          <div class="metric-card-header">
+            <div class="metric-card-name">Pitch Variance Score</div>
+            <div class="metric-card-badge" style="border-color:var(--green); color:var(--green); background:var(--green-dim);">PVS</div>
+          </div>
+          <div class="metric-card-value" style="color:var(--green); text-shadow:0 0 20px rgba(0,255,136,0.4);" id="metric-pvs">0.00</div>
+          <div class="metric-card-label">Prosodic variability</div>
+          <div class="metric-bar"><div class="metric-bar-fill" id="bar-pvs" style="--metric-color:var(--green); --metric-color-alt:var(--cyan); --metric-glow:rgba(0,255,136,0.4); width:0%;"></div></div>
+        </div>
+
+        <div class="panel-section-label" style="margin-top: 4px;">Event Log</div>
+
+        <div class="event-log" id="event-log">
+          <div class="event-log-item">
+            <div class="event-log-dot info"></div>
+            <div class="event-log-text"><strong>System ready.</strong> Monitoring active.</div>
+            <div class="event-log-time">00:00</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       SCREEN 5: SESSION SUMMARY
+  =========================================== -->
+  <div id="screen-summary" class="screen">
+    <div class="summary-card">
+      <div class="summary-header">
+        <div class="summary-header-left">
+          <h2>Session Complete</h2>
+          <p id="summary-subtitle">Session ended · Profile: ADHD</p>
+        </div>
+        <div class="summary-grade-badge">
+          <div class="summary-grade-letter" id="summary-grade">B</div>
+          <div class="summary-grade-label">Overall Grade</div>
+        </div>
+      </div>
+
+      <div class="summary-grid">
+        <div class="summary-stat">
+          <div class="summary-stat-value" id="sum-overall">--</div>
+          <div class="summary-stat-label">Overall Score</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-stat-value" id="sum-eye">--</div>
+          <div class="summary-stat-label">Eye Contact</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-stat-value" id="sum-head">--</div>
+          <div class="summary-stat-label">Head Stability</div>
+        </div>
+        <div class="summary-stat">
+          <div class="summary-stat-value" id="sum-vocal">--</div>
+          <div class="summary-stat-label">Vocal Confidence</div>
+        </div>
+      </div>
+
+      <div class="h-rule"></div>
+
+      <div style="margin-top: 24px; padding: 20px; background: var(--bg-card); border-radius: var(--radius); border: 1px solid var(--border);">
+        <div class="panel-section-label" style="border: none; padding: 0; margin-bottom: 12px;">AI Insights</div>
+        <div id="summary-insights" style="font-size: 13px; line-height: 1.8; color: var(--text-secondary);">
+          Analysis complete. Review the metrics above for detailed performance breakdown.
+        </div>
+      </div>
+
+      <div class="summary-actions">
+        <button class="btn-secondary" id="btn-new-session">New Session</button>
+        <button class="btn-primary" id="btn-export">Export Report</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       OVERLAYS (always in DOM)
+  =========================================== -->
+
+  <!-- Gaze dot -->
+  <div id="gaze-dot"></div>
+
+  <!-- Flag toasts -->
+  <div id="flag-overlay"></div>
+
+  <!-- Intervention overlay -->
+  <div id="intervention-overlay">
+    <div class="intervention-card" id="intervention-card">
+      <button class="intervention-dismiss" id="intervention-dismiss">✕</button>
+      <div class="intervention-eyebrow" id="intervention-eyebrow">Adaptive Intervention</div>
+      <div class="intervention-title" id="intervention-title">Taking a moment</div>
+      <div class="intervention-content" id="intervention-content"></div>
+      <div class="intervention-progress">
+        <div class="intervention-progress-bar" id="intervention-progress-bar"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       SCRIPTS
+  =========================================== -->
+  <script>
+    // === EVENT BUS === //
+    const Bus = (() => {
+      const subs = {};
+      return {
+        on(evt, fn)   { (subs[evt] ||= []).push(fn); },
+        off(evt, fn)  { subs[evt] = (subs[evt] || []).filter(f => f !== fn); },
+        emit(evt, data) { (subs[evt] || []).forEach(fn => fn(data)); }
+      };
+    })();
+  </script>
+
+  <script>
+    // === SENSORS MODULE === //
+    // (Person A pastes sensors.js here)
+  </script>
+
+  <script>
+    // === BRAIN MODULE === //
+    // (Person B pastes brain.js here)
+  </script>
+
+  <script src="ui.js"></script>
+
+  <script>
+    // === APP INIT === //
+    document.addEventListener('DOMContentLoaded', () => {
+      if (window.AdaptIQ_UI) {
+        window.AdaptIQ_UI.init();
+      }
+    });
+  </script>
+</body>
+</html>
