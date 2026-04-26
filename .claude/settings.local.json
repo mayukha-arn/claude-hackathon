@@ -7,7 +7,12 @@
       "Bash(node -c integration/brain.js)",
       "Bash(node -c perception/sensors.js)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git commit *)",
+      "Bash(git reset *)",
+      "Bash(git remote *)",
+      "Bash(node *)"
     ]
   }
 }
