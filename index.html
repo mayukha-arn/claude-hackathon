@@ -1148,12 +1148,21 @@
       <p>Choose the profile that best matches the learner's needs.<br>AdaptIQ will tailor all interventions and sensitivity thresholds accordingly.</p>
     </div>
 
-    <div style="text-align:center;margin-bottom:28px;">
+    <div style="text-align:center;margin-bottom:20px;">
       <input id="api-key-input" type="password"
              placeholder="Claude API Key (optional — enables AI responses)"
              style="background:#0c1425;border:1px solid rgba(0,229,255,0.25);color:#e8f4ff;
                     padding:12px 18px;border-radius:8px;font-size:14px;width:360px;
                     outline:none;font-family:inherit;letter-spacing:0.02em;" />
+    </div>
+
+    <div style="text-align:center;margin-bottom:28px;">
+      <label style="display:inline-flex;align-items:center;gap:10px;cursor:pointer;
+                    background:#0c1425;border:1px solid rgba(255,183,0,0.3);
+                    padding:8px 18px;border-radius:8px;font-size:13px;color:#ffb700;font-family:var(--font-mono);">
+        <input type="checkbox" id="demo-mode-toggle" style="accent-color:#ffb700;width:16px;height:16px;">
+        ⚡ DEMO MODE — fast calibration, short cooldowns
+      </label>
     </div>
 
     <div class="profile-grid">
@@ -2202,6 +2211,18 @@ const AnomalyDetector = (() => {
     OVERCONFIDENT_PACE: 10000,
   };
 
+  // Demo mode: much shorter durations so flags fire in seconds during a live demo
+  const DEMO_FLAG_DURATION = {
+    GAZE_ERRATIC:       1000,
+    GAZE_LOST:          1500,
+    ATTENTION_DROP:     2000,
+    STRESS_DETECTED:    1500,
+    FOCUS_DRIFT:        2000,
+    SPEECH_PANIC:       1000,
+    PROLONGED_SILENCE:  3000,
+    OVERCONFIDENT_PACE: 2000,
+  };
+
   const FLAG_SEVERITY = {
     GAZE_ERRATIC:       'medium',
     GAZE_LOST:          'high',
@@ -2276,7 +2297,8 @@ const AnomalyDetector = (() => {
     const elapsed = now - calibrationStartTime;
 
     if (isCalibrating) {
-      if (elapsed < 30000) { Bus.emit('signal:update', { ...latestSignals, ces: 100 }); return; }
+      const calibWindow = window.DEMO_MODE ? 5000 : 30000;
+      if (elapsed < calibWindow) { Bus.emit('signal:update', { ...latestSignals, ces: 100 }); return; }
       isCalibrating = false;
       Bus.emit('calibration:complete', { type: 'baseline' });
     }
@@ -2290,7 +2312,7 @@ const AnomalyDetector = (() => {
       if (triggered) {
         if (!flagOnsetTimes[flagType]) {
           flagOnsetTimes[flagType] = now;
-        } else if (now - flagOnsetTimes[flagType] >= FLAG_DURATION[flagType]) {
+        } else if (now - flagOnsetTimes[flagType] >= (window.DEMO_MODE ? DEMO_FLAG_DURATION : FLAG_DURATION)[flagType]) {
           delete flagOnsetTimes[flagType];
           Bus.emit('flag:fired', {
             type: flagType,
@@ -2349,7 +2371,7 @@ const InterventionDispatcher = (() => {
   Bus.on('flag:fired', (flag) => {
     if (!activeProfile) return;
     const now = Date.now();
-    if (now - lastInterventionTime < activeProfile.cooldown_seconds * 1000) return;
+    if (now - lastInterventionTime < (window.DEMO_MODE ? 5 : activeProfile.cooldown_seconds) * 1000) return;
     const intervention = activeProfile.interventions[flag.type];
     if (!intervention) return;
     interventionLog.push({ flag, intervention, timestamp: now });
@@ -2616,6 +2638,13 @@ window.BrainManager = {
     (async () => {
       // Boot UI (runs loading sequence, then shows profile screen)
       if (window.AdaptIQ_UI) window.AdaptIQ_UI.init();
+
+      // Wire Demo Mode toggle — reads checkbox state each time a profile is selected so it can be toggled on profile screen
+      window.DEMO_MODE = false;
+      document.getElementById('demo-mode-toggle')?.addEventListener('change', (e) => {
+        window.DEMO_MODE = e.target.checked;
+        console.log('[AppInit] Demo mode:', window.DEMO_MODE ? 'ON' : 'OFF');
+      });
 
       // Set demo API key immediately so ClaudeClient is ready before any profile is chosen
       if (window.ClaudeClient) {
