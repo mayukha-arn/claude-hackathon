@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AdaptIQ Sensors — Test</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/meyda/dist/web/meyda.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0f; color: #e4e4e7; font-family: monospace; display: flex; flex-direction: column; align-items: center; padding: 24px; gap: 16px; }
+    h1 { color: #00d4ff; font-size: 1.4rem; }
+    #status { color: #a1a1aa; font-size: 0.9rem; }
+
+    #video-wrap { position: relative; width: 400px; height: 300px; background: #141420; border: 1px solid #2a2a3a; border-radius: 8px; overflow: hidden; }
+    #webcam  { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+    #overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+    .panels { display: flex; gap: 16px; width: 100%; max-width: 900px; }
+    .panel { flex: 1; background: #141420; border: 1px solid #2a2a3a; border-radius: 8px; padding: 12px; }
+    .panel h2 { color: #00d4ff; font-size: 0.85rem; margin-bottom: 8px; }
+
+    .signal { display: flex; justify-content: space-between; font-size: 0.8rem; margin: 4px 0; }
+    .signal span.label { color: #a1a1aa; }
+    .signal span.val   { color: #22c55e; font-weight: bold; }
+
+    #transcript-box { background: #141420; border: 1px solid #2a2a3a; border-radius: 8px; padding: 12px; width: 100%; max-width: 900px; font-size: 0.8rem; color: #a1a1aa; min-height: 60px; white-space: pre-wrap; }
+
+    .controls { display: flex; gap: 12px; }
+    button { padding: 8px 20px; border: 1px solid #2a2a3a; border-radius: 6px; background: #1e1e30; color: #e4e4e7; cursor: pointer; font-family: monospace; font-size: 0.85rem; }
+    button:hover { background: #2a2a3a; }
+    button.primary { background: #00d4ff22; border-color: #00d4ff; color: #00d4ff; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #log { width: 100%; max-width: 900px; background: #141420; border: 1px solid #2a2a3a; border-radius: 8px; padding: 12px; font-size: 0.75rem; color: #a1a1aa; max-height: 160px; overflow-y: auto; }
+    #log .entry { margin: 2px 0; }
+    #log .entry.ok  { color: #22c55e; }
+    #log .entry.warn{ color: #f59e0b; }
+    #log .entry.err { color: #ef4444; }
+  </style>
+</head>
+<body>
+
+<h1>AdaptIQ — Sensors Test Harness</h1>
+<div id="status">Idle</div>
+
+<div id="video-wrap">
+  <video id="webcam" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<div class="controls">
+  <button id="btn-init" class="primary">1. Init Sensors</button>
+  <button id="btn-calib" disabled>2. Gaze Calibration</button>
+  <button id="btn-start" disabled>3. Start</button>
+  <button id="btn-stop"  disabled>4. Stop</button>
+</div>
+
+<div class="panels">
+  <div class="panel">
+    <h2>Face Signals</h2>
+    <div class="signal"><span class="label">ET  — Expression Tension</span><span class="val" id="s-et">—</span></div>
+    <div class="signal"><span class="label">HPD — Head Pose Deviation</span><span class="val" id="s-hpd">—</span></div>
+    <div class="signal"><span class="label">BRA — Blink Rate Anomaly</span><span class="val" id="s-bra">—</span></div>
+  </div>
+  <div class="panel">
+    <h2>Gaze Signals</h2>
+    <div class="signal"><span class="label">GDS — Gaze Drift Score</span><span class="val" id="s-gds">—</span></div>
+    <div class="signal"><span class="label">OSR — Off-Screen Ratio</span><span class="val" id="s-osr">—</span></div>
+    <div class="signal"><span class="label">X / Y — Raw Gaze</span><span class="val" id="s-xy">—</span></div>
+  </div>
+  <div class="panel">
+    <h2>Audio Signals</h2>
+    <div class="signal"><span class="label">VES — Vocal Energy Spike</span><span class="val" id="s-ves">—</span></div>
+    <div class="signal"><span class="label">PVS — Pitch Variance</span><span class="val" id="s-pvs">—</span></div>
+    <div class="signal"><span class="label">SilR — Silence Ratio</span><span class="val" id="s-silr">—</span></div>
+    <div class="signal"><span class="label">SR  — Speech Rate</span><span class="val" id="s-sr">—</span></div>
+  </div>
+</div>
+
+<div id="transcript-box">Transcript will appear here...</div>
+<div id="log"></div>
+
+<!-- Event Bus -->
+<script>
+const Bus = (() => {
+  const subs = {};
+  return {
+    on(evt, fn)   { (subs[evt] ||= []).push(fn); },
+    off(evt, fn)  { subs[evt] = (subs[evt] || []).filter(f => f !== fn); },
+    emit(evt, data){ (subs[evt] || []).forEach(fn => fn(data)); }
+  };
+})();
+</script>
+
+<!-- Sensors Module -->
+<script src="sensors.js"></script>
+
+<!-- Test Harness Logic -->
+<script>
+const videoEl  = document.getElementById('webcam');
+const canvas   = document.getElementById('overlay');
+const ctx      = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const logEl    = document.getElementById('log');
+
+function log(msg, type = 'ok') {
+  const d = document.createElement('div');
+  d.className = `entry ${type}`;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.prepend(d);
+}
+
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// Resize canvas to match video
+function syncCanvas() {
+  canvas.width  = videoEl.offsetWidth;
+  canvas.height = videoEl.offsetHeight;
+}
+new ResizeObserver(syncCanvas).observe(videoEl);
+
+// ── Bus listeners ──────────────────────────────────────────────────────────
+
+Bus.on('models:loaded', () => {
+  log('Face-api models loaded ✓');
+  setStatus('Models loaded — ready to calibrate');
+  document.getElementById('btn-calib').disabled = false;
+  document.getElementById('btn-start').disabled = false;
+});
+
+Bus.on('signal:face', ({ et, hpd, bra, bbox, landmarks }) => {
+  document.getElementById('s-et').textContent  = et;
+  document.getElementById('s-hpd').textContent = hpd;
+  document.getElementById('s-bra').textContent = bra;
+
+  // Draw face bounding box
+  syncCanvas();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (bbox) {
+    // face-api box coords are in video-native pixels; scale to displayed size
+    const scaleX = canvas.width  / videoEl.videoWidth;
+    const scaleY = canvas.height / videoEl.videoHeight;
+    // mirrored: flip x
+    const mirroredX = canvas.width - (bbox.x + bbox.width) * scaleX;
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(mirroredX, bbox.y * scaleY, bbox.width * scaleX, bbox.height * scaleY);
+  }
+});
+
+Bus.on('signal:gaze', ({ gds, osr, x, y }) => {
+  document.getElementById('s-gds').textContent = gds;
+  document.getElementById('s-osr').textContent = osr;
+  document.getElementById('s-xy').textContent  = `${Math.round(x)}, ${Math.round(y)}`;
+});
+
+Bus.on('signal:audio', ({ ves, pvs, silr, sr, transcript }) => {
+  document.getElementById('s-ves').textContent  = ves;
+  document.getElementById('s-pvs').textContent  = pvs;
+  document.getElementById('s-silr').textContent = silr;
+  document.getElementById('s-sr').textContent   = sr;
+  if (transcript) document.getElementById('transcript-box').textContent = transcript;
+});
+
+Bus.on('calibration:complete', ({ type }) => {
+  log(`Calibration complete: ${type}`);
+  setStatus(type === 'gaze' ? 'Gaze calibrated — start sensors' : 'Baseline calibrated');
+});
+
+Bus.on('flag:fired', ({ type, severity, message }) => {
+  log(`FLAG [${severity}] ${type}: ${message}`, severity === 'high' ? 'err' : 'warn');
+});
+
+// ── Button handlers ────────────────────────────────────────────────────────
+
+document.getElementById('btn-init').onclick = async () => {
+  try {
+    setStatus('Requesting camera + mic permissions...');
+    // Start webcam so FaceEngine has a video element
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    videoEl.srcObject = stream;
+    await videoEl.play();
+
+    setStatus('Loading face-api models (may take ~10s)...');
+    log('Initialising SensorManager...');
+    await SensorManager.init(videoEl);
+    document.getElementById('btn-init').disabled = true;
+    log('SensorManager.init() complete');
+  } catch (err) {
+    log('Init failed: ' + err.message, 'err');
+    setStatus('Error — check console');
+    console.error(err);
+  }
+};
+
+document.getElementById('btn-calib').onclick = async () => {
+  log('Starting gaze calibration...');
+  setStatus('Gaze calibration — click the dots');
+  await SensorManager.startCalibration();
+};
+
+document.getElementById('btn-start').onclick = () => {
+  SensorManager.start();
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled  = false;
+  setStatus('Running — sensors active');
+  log('Sensors started');
+};
+
+document.getElementById('btn-stop').onclick = () => {
+  SensorManager.stop();
+  document.getElementById('btn-stop').disabled  = true;
+  document.getElementById('btn-start').disabled = false;
+  setStatus('Stopped');
+  log('Sensors stopped', 'warn');
+};
+</script>
+
+</body>
+</html>
