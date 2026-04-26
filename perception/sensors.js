@@ -57,6 +57,11 @@ const FaceEngine = (() => {
   const EAR_THRESHOLD = 0.21;
   const BLINK_MIN_FRAMES = 2;
 
+  // HPD pitch baseline — calibrated from first 30 detected frames
+  let pitchBaseline = null;
+  let pitchSamples = [];
+  let sessionStartTime = null;
+
   // Euclidean distance between two landmark points {x, y}
   function dist(p1, p2) {
     return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
@@ -72,8 +77,9 @@ const FaceEngine = (() => {
   }
 
   function computeET(expressions) {
-    const neutral = expressions?.neutral ?? 1;
-    const raw = (1 - neutral) * 100;
+    // Only negative emotions signal tension — happy/surprised are not stress indicators
+    const raw = Math.min(100, ((expressions?.angry ?? 0) + (expressions?.fearful ?? 0) +
+                               (expressions?.disgusted ?? 0) + (expressions?.sad ?? 0)) * 100);
     etBuf.push(raw);
     return Math.round(etBuf.mean());
   }
@@ -87,16 +93,22 @@ const FaceEngine = (() => {
 
       const noseToLeft  = dist(noseTip, leftEdge);
       const noseToRight = dist(noseTip, rightEdge);
-      // Yaw: 0 when perfectly centred (ratio = 1)
       const yawRatio = noseToLeft / (noseToRight + 1e-6);
-      const yaw = Math.abs(yawRatio - 1) * 100; // 0 = centre, larger = turned
+      const yaw = Math.abs(yawRatio - 1) * 100; // 0 = centred
 
-      // Pitch: vertical displacement of nose relative to mid-eye line
+      // Pitch: deviation from anatomical baseline (nose always below eyes)
       const leftEye  = pts[36];
       const rightEye = pts[45];
       const eyeMidY  = (leftEye.y + rightEye.y) / 2;
       const eyeSpan  = dist(leftEye, rightEye);
-      const pitch = Math.abs(noseTip.y - eyeMidY) / (eyeSpan + 1e-6) * 100;
+      const rawPitch = (noseTip.y - eyeMidY) / (eyeSpan + 1e-6) * 100;
+
+      // Calibrate pitch baseline from first 30 frames so neutral pose = 0
+      if (pitchSamples.length < 30) {
+        pitchSamples.push(rawPitch);
+        pitchBaseline = pitchSamples.reduce((a, b) => a + b, 0) / pitchSamples.length;
+      }
+      const pitch = Math.abs(rawPitch - (pitchBaseline ?? rawPitch));
 
       const raw = Math.min(100, Math.sqrt(yaw ** 2 + pitch ** 2));
       hpdBuf.push(raw);
@@ -122,10 +134,13 @@ const FaceEngine = (() => {
         earBelow = 0;
       }
 
-      // Purge blinks older than 60 seconds
       const now = Date.now();
       blinkTimestamps = blinkTimestamps.filter(t => now - t < 60000);
-      const blinksPerMin = blinkTimestamps.length;
+
+      // Normalize blink count to per-minute rate based on elapsed time (avoids false spike in first 60s)
+      const elapsedSecs = sessionStartTime ? (now - sessionStartTime) / 1000 : 60;
+      const windowSecs  = Math.min(60, Math.max(elapsedSecs, 10));
+      const blinksPerMin = (blinkTimestamps.length / windowSecs) * 60;
 
       // BRA: deviation from normal rate ~17 bpm
       const raw = Math.min(100, Math.abs(blinksPerMin - 17) / 17 * 100);
@@ -175,7 +190,7 @@ const FaceEngine = (() => {
     });
   }
 
-  function start() { running = true; _loop(); }
+  function start() { running = true; sessionStartTime = Date.now(); pitchBaseline = null; pitchSamples = []; _loop(); }
   function stop()  { running = false; if (rafId) cancelAnimationFrame(rafId); }
   function getLatest() { return latest; }
 
@@ -393,6 +408,10 @@ const AudioEngine = (() => {
   const centroidBuf  = new SignalBuffer(30);
   const silenceWindows = []; // last 15 windows (true/false for silence)
 
+  // Adaptive silence threshold — calibrated from ambient noise in first 5 windows
+  let silenceThreshold = 0.01; // default, overridden after calibration
+  let ambientSamples = [];
+
   let latestFeatures = { rms: 0, spectralCentroid: 0 };
   let latest = { ves: 0, pvs: 0, silr: 0, sr: 0, transcript: '' };
 
@@ -462,8 +481,8 @@ const AudioEngine = (() => {
       rmsBuf.push(rms);
       centroidBuf.push(centroid);
 
-      // VES: z-score spike in vocal energy
-      const ves = Math.min(100, Math.abs(rmsBuf.zScore(rms)) * 25);
+      // VES: upward spikes in vocal energy only (sudden quiet is not a vocal stress indicator)
+      const ves = Math.min(100, Math.max(0, rmsBuf.zScore(rms)) * 25);
 
       // PVS: coefficient of variation of spectral centroid
       const centroidMean = centroidBuf.mean();
@@ -471,16 +490,23 @@ const AudioEngine = (() => {
         ? Math.min(100, (centroidBuf.stddev() / centroidMean) * 100)
         : 0;
 
+      // Calibrate silence threshold from first 5 ambient RMS samples (before user speaks)
+      if (ambientSamples.length < 5) {
+        ambientSamples.push(rms);
+        silenceThreshold = Math.max(0.005, ambientSamples.reduce((a,b)=>a+b,0)/ambientSamples.length * 3);
+      }
+
       // SilR: fraction of last 15 windows that were silent
-      silenceWindows.push(rms < 0.01);
+      silenceWindows.push(rms < silenceThreshold);
       if (silenceWindows.length > 15) silenceWindows.shift();
       const silr = (silenceWindows.filter(Boolean).length / silenceWindows.length) * 100;
 
       // SR: speech rate deviation from optimal 135 WPM
+      // Return 0 (no penalty) when no speech data yet — user hasn't spoken, not speaking wrong
       const now = Date.now();
       wordTimestamps = wordTimestamps.filter(e => now - e.time < 60000);
       const totalWords = wordTimestamps.reduce((s, e) => s + e.words, 0);
-      const sr = Math.min(100, Math.abs(totalWords - 135) / 135 * 100);
+      const sr = totalWords === 0 ? 0 : Math.min(100, Math.abs(totalWords - 135) / 135 * 100);
 
       latest = {
         ves: Math.round(ves),
@@ -516,6 +542,8 @@ const AudioEngine = (() => {
     fullTranscript = '';
     wordTimestamps = [];
     silenceWindows.length = 0;
+    ambientSamples = [];
+    silenceThreshold = 0.01;
   }
 
   return { init, start, stop, reset, getLatest, getTranscript };
