@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(start chrome *)"
+      "Bash(start chrome *)",
+      "Bash(start *)",
+      "Bash(grep -v \"\\\\.md$\")",
+      "Bash(node -c integration/brain.js)",
+      "Bash(node -c perception/sensors.js)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

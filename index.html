@@ -7,7 +7,7 @@
 
   <!-- CDN Dependencies -->
   <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js"></script>
-  <script src="https://webgazer.cs.brown.edu/webgazer.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/meyda/dist/web/meyda.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1148,6 +1148,14 @@
       <p>Choose the profile that best matches the learner's needs.<br>AdaptIQ will tailor all interventions and sensitivity thresholds accordingly.</p>
     </div>
 
+    <div style="text-align:center;margin-bottom:28px;">
+      <input id="api-key-input" type="password"
+             placeholder="Claude API Key (optional — enables AI responses)"
+             style="background:#0c1425;border:1px solid rgba(0,229,255,0.25);color:#e8f4ff;
+                    padding:12px 18px;border-radius:8px;font-size:14px;width:360px;
+                    outline:none;font-family:inherit;letter-spacing:0.02em;" />
+    </div>
+
     <div class="profile-grid">
       <div class="profile-card" data-id="adhd">
         <div class="profile-card-tag">Attention</div>
@@ -1562,7 +1570,513 @@
 
   <script>
     // === SENSORS MODULE === //
-    // (Person A pastes sensors.js here)
+// === ADAPTIQ SENSORS MODULE === //
+
+// ─── SignalBuffer ────────────────────────────────────────────────────────────
+class SignalBuffer {
+  constructor(windowSize = 60) {
+    this._size = windowSize;
+    this._buf = [];
+  }
+
+  push(value) {
+    this._buf.push(value);
+    if (this._buf.length > this._size) this._buf.shift();
+  }
+
+  values() { return [...this._buf]; }
+
+  mean() {
+    if (!this._buf.length) return 0;
+    return this._buf.reduce((a, b) => a + b, 0) / this._buf.length;
+  }
+
+  stddev() {
+    if (this._buf.length < 2) return 0;
+    const m = this.mean();
+    const variance = this._buf.reduce((sum, v) => sum + (v - m) ** 2, 0) / this._buf.length;
+    return Math.sqrt(variance);
+  }
+
+  zScore(currentValue) {
+    const sd = this.stddev();
+    if (sd === 0) return 0;
+    return (currentValue - this.mean()) / sd;
+  }
+}
+
+window.SignalBuffer = SignalBuffer;
+
+// ─── FaceEngine ──────────────────────────────────────────────────────────────
+const FaceEngine = (() => {
+  const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+
+  let videoEl = null;
+  let running = false;
+  let rafId = null;
+  let latest = {};
+
+  const etBuf  = new SignalBuffer(60);
+  const hpdBuf = new SignalBuffer(60);
+  const braBuf = new SignalBuffer(60);
+
+  let blinkCount = 0;
+  let blinkTimestamps = [];
+  let earBelow = 0;
+  const EAR_THRESHOLD = 0.21;
+  const BLINK_MIN_FRAMES = 2;
+
+  function dist(p1, p2) {
+    return Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+  }
+
+  function eyeAspectRatio(pts) {
+    const vertical1 = dist(pts[1], pts[5]);
+    const vertical2 = dist(pts[2], pts[4]);
+    const horizontal = dist(pts[0], pts[3]);
+    return (vertical1 + vertical2) / (2 * horizontal);
+  }
+
+  function computeET(expressions) {
+    const neutral = expressions?.neutral ?? 1;
+    const raw = (1 - neutral) * 100;
+    etBuf.push(raw);
+    return Math.round(etBuf.mean());
+  }
+
+  function computeHPD(landmarks) {
+    try {
+      const pts = landmarks.positions;
+      const noseTip   = pts[30];
+      const leftEdge  = pts[0];
+      const rightEdge = pts[16];
+
+      const noseToLeft  = dist(noseTip, leftEdge);
+      const noseToRight = dist(noseTip, rightEdge);
+      const yawRatio = noseToLeft / (noseToRight + 1e-6);
+      const yaw = Math.abs(yawRatio - 1) * 100;
+
+      const leftEye  = pts[36];
+      const rightEye = pts[45];
+      const eyeMidY  = (leftEye.y + rightEye.y) / 2;
+      const eyeSpan  = dist(leftEye, rightEye);
+      const pitch = Math.abs(noseTip.y - eyeMidY) / (eyeSpan + 1e-6) * 100;
+
+      const raw = Math.min(100, Math.sqrt(yaw ** 2 + pitch ** 2));
+      hpdBuf.push(raw);
+      return Math.round(hpdBuf.mean());
+    } catch {
+      return 0;
+    }
+  }
+
+  function computeBRA(landmarks) {
+    try {
+      const pts = landmarks.positions;
+      const leftEyePts  = [pts[36], pts[37], pts[38], pts[39], pts[40], pts[41]];
+      const rightEyePts = [pts[42], pts[43], pts[44], pts[45], pts[46], pts[47]];
+      const ear = (eyeAspectRatio(leftEyePts) + eyeAspectRatio(rightEyePts)) / 2;
+
+      if (ear < EAR_THRESHOLD) {
+        earBelow++;
+      } else {
+        if (earBelow >= BLINK_MIN_FRAMES) {
+          blinkTimestamps.push(Date.now());
+        }
+        earBelow = 0;
+      }
+
+      const now = Date.now();
+      blinkTimestamps = blinkTimestamps.filter(t => now - t < 60000);
+      const blinksPerMin = blinkTimestamps.length;
+
+      const raw = Math.min(100, Math.abs(blinksPerMin - 17) / 17 * 100);
+      braBuf.push(raw);
+      return Math.round(braBuf.mean());
+    } catch {
+      return 0;
+    }
+  }
+
+  const zero = () => ({ et: 0, hpd: 0, bra: 0, landmarks: null, expressions: null, bbox: null });
+
+  async function init(video) {
+    videoEl = video;
+    await Promise.all([
+      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+      faceapi.nets.faceExpressionNet.loadFromUri(MODEL_URL),
+    ]);
+    Bus.emit('models:loaded', {});
+  }
+
+  function _loop() {
+    if (!running) return;
+    rafId = requestAnimationFrame(async () => {
+      try {
+        const detection = await faceapi
+          .detectSingleFace(videoEl, new faceapi.TinyFaceDetectorOptions())
+          .withFaceLandmarks()
+          .withFaceExpressions();
+
+        if (!detection) {
+          latest = zero();
+          Bus.emit('signal:face', latest);
+        } else {
+          const et  = computeET(detection.expressions);
+          const hpd = computeHPD(detection.landmarks);
+          const bra = computeBRA(detection.landmarks);
+          const bbox = detection.detection.box;
+          latest = { et, hpd, bra, landmarks: detection.landmarks, expressions: detection.expressions, bbox };
+          Bus.emit('signal:face', latest);
+        }
+      } catch (err) {
+        console.warn('[FaceEngine] frame error:', err);
+      }
+      _loop();
+    });
+  }
+
+  function start() { running = true; _loop(); }
+  function stop()  { running = false; if (rafId) cancelAnimationFrame(rafId); }
+  function getLatest() { return latest; }
+
+  return { init, start, stop, getLatest };
+})();
+
+window.FaceEngine = FaceEngine;
+
+// ─── GazeEngine ──────────────────────────────────────────────────────────────
+const GazeEngine = (() => {
+  let faceMesh = null;
+  let videoEl  = null;
+  let loopId   = null;
+  let running  = false;
+  let latest   = { gds: 0, osr: 0, x: 0, y: 0 };
+
+  let baseline     = null;
+  let calibrating  = false;
+  let calibSamples = [];
+
+  const xBuf = new SignalBuffer(30);
+  const yBuf = new SignalBuffer(30);
+  const gazeHistory = [];
+
+  const L_IRIS = 468, R_IRIS = 473;
+  const L_OUTER = 33,  L_INNER = 133, L_TOP = 159, L_BOT = 145;
+  const R_INNER = 362, R_OUTER = 263, R_TOP = 386, R_BOT = 374;
+
+  function _irisRatio(lm) {
+    const lx = (lm[L_IRIS].x - lm[L_OUTER].x) / (lm[L_INNER].x - lm[L_OUTER].x + 1e-6);
+    const ly = (lm[L_IRIS].y - lm[L_TOP].y)   / (lm[L_BOT].y   - lm[L_TOP].y   + 1e-6);
+    const rx = (lm[R_IRIS].x - lm[R_INNER].x) / (lm[R_OUTER].x - lm[R_INNER].x + 1e-6);
+    const ry = (lm[R_IRIS].y - lm[R_TOP].y)   / (lm[R_BOT].y   - lm[R_TOP].y   + 1e-6);
+    return { avgX: (lx + rx) / 2, avgY: (ly + ry) / 2 };
+  }
+
+  function _irisToScreen(iris) {
+    if (!baseline) return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    const dx = iris.avgX - baseline.avgX;
+    const dy = iris.avgY - baseline.avgY;
+    const sx = window.innerWidth  / 2 + dx * (window.innerWidth  / 0.3);
+    const sy = window.innerHeight / 2 + dy * (window.innerHeight / 0.3);
+    return {
+      x: Math.max(0, Math.min(window.innerWidth,  sx)),
+      y: Math.max(0, Math.min(window.innerHeight, sy)),
+    };
+  }
+
+  function _onResults(results) {
+    if (!results.multiFaceLandmarks?.length) return;
+    const lm = results.multiFaceLandmarks[0];
+    if (!lm[L_IRIS] || !lm[R_IRIS]) return;
+
+    const iris = _irisRatio(lm);
+
+    if (calibrating) {
+      calibSamples.push(iris);
+      return;
+    }
+
+    if (!running) return;
+
+    const { x, y } = _irisToScreen(iris);
+    xBuf.push(x);
+    yBuf.push(y);
+
+    const diag = Math.sqrt(window.innerWidth ** 2 + window.innerHeight ** 2);
+    const gds  = Math.min(100,
+      Math.sqrt(xBuf.stddev() ** 2 + yBuf.stddev() ** 2) / diag * 100
+    );
+
+    gazeHistory.push({ x, y });
+    if (gazeHistory.length > 60) gazeHistory.shift();
+
+    const mX = window.innerWidth  * 0.2;
+    const mY = window.innerHeight * 0.2;
+    const outside = gazeHistory.filter(p =>
+      p.x < mX || p.x > window.innerWidth  - mX ||
+      p.y < mY || p.y > window.innerHeight - mY
+    ).length;
+    const osr = (outside / gazeHistory.length) * 100;
+
+    latest = { gds: Math.round(gds), osr: Math.round(osr), x, y };
+    Bus.emit('signal:gaze', latest);
+  }
+
+  async function init(video) {
+    videoEl = video;
+
+    if (typeof FaceMesh === 'undefined') {
+      console.warn('[GazeEngine] MediaPipe FaceMesh not loaded — gaze disabled');
+      return;
+    }
+
+    faceMesh = new FaceMesh({
+      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    faceMesh.onResults(_onResults);
+    await faceMesh.initialize();
+
+    loopId = setInterval(async () => {
+      if (videoEl.readyState >= 2) {
+        try { await faceMesh.send({ image: videoEl }); }
+        catch (e) { console.warn('[GazeEngine] send error:', e); }
+      }
+    }, 100);
+  }
+
+  function startCalibration() {
+    return new Promise((resolve) => {
+      calibrating  = true;
+      calibSamples = [];
+
+      const overlay = document.createElement('div');
+      overlay.id = 'gaze-calibration-overlay';
+      overlay.style.cssText = `
+        position:fixed;inset:0;z-index:9999;background:rgba(10,10,15,0.95);
+        display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;
+      `;
+
+      const msg = document.createElement('p');
+      msg.style.cssText = `color:#e4e4e7;font-size:1.3rem;font-family:sans-serif;text-align:center;`;
+      msg.textContent = 'Look at the dot and stay still';
+
+      const dot = document.createElement('div');
+      dot.style.cssText = `
+        width:28px;height:28px;border-radius:50%;
+        background:#00d4ff;box-shadow:0 0 24px #00d4ff;
+      `;
+
+      const track = document.createElement('div');
+      track.style.cssText = `width:280px;height:6px;background:#2a2a3a;border-radius:3px;overflow:hidden;`;
+      const fill = document.createElement('div');
+      fill.style.cssText = `height:100%;width:0%;background:#00d4ff;transition:width 0.1s linear;`;
+      track.appendChild(fill);
+
+      const sub = document.createElement('p');
+      sub.style.cssText = `color:#a1a1aa;font-size:0.9rem;font-family:sans-serif;`;
+      sub.textContent = 'Capturing your eye baseline…';
+
+      overlay.append(msg, dot, track, sub);
+      document.body.appendChild(overlay);
+
+      const DURATION = 3000;
+      const start = Date.now();
+
+      const tick = setInterval(() => {
+        const elapsed = Date.now() - start;
+        fill.style.width = Math.min(100, elapsed / DURATION * 100) + '%';
+
+        if (elapsed >= DURATION) {
+          clearInterval(tick);
+          calibrating = false;
+
+          if (calibSamples.length > 5) {
+            baseline = {
+              avgX: calibSamples.reduce((s, v) => s + v.avgX, 0) / calibSamples.length,
+              avgY: calibSamples.reduce((s, v) => s + v.avgY, 0) / calibSamples.length,
+            };
+          } else {
+            baseline = { avgX: 0.5, avgY: 0.5 };
+          }
+
+          document.body.removeChild(overlay);
+          Bus.emit('calibration:complete', { type: 'gaze' });
+          resolve();
+        }
+      }, 100);
+    });
+  }
+
+  function start() { running = true; }
+  function stop()  {
+    running = false;
+    if (loopId) { clearInterval(loopId); loopId = null; }
+  }
+  function getLatest() { return latest; }
+
+  return { init, startCalibration, start, stop, getLatest };
+})();
+
+window.GazeEngine = GazeEngine;
+
+// ─── AudioEngine ─────────────────────────────────────────────────────────────
+const AudioEngine = (() => {
+  let audioCtx = null;
+  let analyser = null;
+  let meydaAnalyzer = null;
+  let recognition = null;
+  let intervalId = null;
+  let running = false;
+
+  let fullTranscript = '';
+  let wordTimestamps = [];
+
+  const rmsBuf       = new SignalBuffer(30);
+  const centroidBuf  = new SignalBuffer(30);
+  const silenceWindows = [];
+
+  let latestFeatures = { rms: 0, spectralCentroid: 0 };
+  let latest = { ves: 0, pvs: 0, silr: 0, sr: 0, transcript: '' };
+
+  function _rmsFromAnalyser() {
+    const buf = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(buf);
+    const sum = buf.reduce((s, v) => s + v * v, 0);
+    return Math.sqrt(sum / buf.length);
+  }
+
+  function _setupSpeechRecognition() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+
+    recognition.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          fullTranscript += t + ' ';
+          const words = t.trim().split(/\s+/).filter(Boolean).length;
+          wordTimestamps.push({ words, time: Date.now() });
+        }
+      }
+    };
+    recognition.onerror = (e) => console.warn('[AudioEngine] SR error:', e.error);
+    recognition.onend  = () => { if (running) recognition.start(); };
+  }
+
+  async function init(mediaStream) {
+    // Use provided stream or request audio-only (for backward compatibility with test harness)
+    const stream = mediaStream || (await navigator.mediaDevices.getUserMedia({ audio: true, video: false }));
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+
+    try {
+      meydaAnalyzer = Meyda.createMeydaAnalyzer({
+        audioContext: audioCtx,
+        source,
+        bufferSize: 2048,
+        featureExtractors: ['rms', 'spectralCentroid', 'zcr'],
+        callback: (features) => { latestFeatures = features; },
+      });
+    } catch (err) {
+      console.warn('[AudioEngine] Meyda init failed, using fallback RMS:', err);
+    }
+
+    _setupSpeechRecognition();
+  }
+
+  function _computeSignals() {
+    try {
+      const rms = (meydaAnalyzer && latestFeatures?.rms != null)
+        ? latestFeatures.rms
+        : _rmsFromAnalyser();
+      const centroid = latestFeatures?.spectralCentroid ?? 0;
+
+      rmsBuf.push(rms);
+      centroidBuf.push(centroid);
+
+      const ves = Math.min(100, Math.abs(rmsBuf.zScore(rms)) * 25);
+
+      const centroidMean = centroidBuf.mean();
+      const pvs = centroidMean > 0
+        ? Math.min(100, (centroidBuf.stddev() / centroidMean) * 100)
+        : 0;
+
+      silenceWindows.push(rms < 0.01);
+      if (silenceWindows.length > 15) silenceWindows.shift();
+      const silr = (silenceWindows.filter(Boolean).length / silenceWindows.length) * 100;
+
+      const now = Date.now();
+      wordTimestamps = wordTimestamps.filter(e => now - e.time < 60000);
+      const totalWords = wordTimestamps.reduce((s, e) => s + e.words, 0);
+      const sr = Math.min(100, Math.abs(totalWords - 135) / 135 * 100);
+
+      latest = {
+        ves: Math.round(ves),
+        pvs: Math.round(pvs),
+        silr: Math.round(silr),
+        sr: Math.round(sr),
+        transcript: fullTranscript,
+      };
+      Bus.emit('signal:audio', latest);
+    } catch (err) {
+      console.warn('[AudioEngine] compute error:', err);
+    }
+  }
+
+  function start() {
+    running = true;
+    if (meydaAnalyzer) meydaAnalyzer.start();
+    if (recognition) { try { recognition.start(); } catch {} }
+    intervalId = setInterval(_computeSignals, 2000);
+  }
+
+  function stop() {
+    running = false;
+    if (meydaAnalyzer) try { meydaAnalyzer.stop(); } catch {}
+    if (recognition)   try { recognition.stop();   } catch {}
+    if (intervalId)    clearInterval(intervalId);
+  }
+
+  function getLatest()    { return latest; }
+  function getTranscript(){ return fullTranscript; }
+
+  function reset() {
+    fullTranscript = '';
+    wordTimestamps = [];
+    silenceWindows.length = 0;
+  }
+
+  return { init, start, stop, reset, getLatest, getTranscript };
+})();
+
+window.AudioEngine = AudioEngine;
+
+// ─── SensorManager ───────────────────────────────────────────────────────────
+window.SensorManager = {
+  async init(videoElement, mediaStream) {
+    await FaceEngine.init(videoElement);
+    await GazeEngine.init(videoElement);
+    await AudioEngine.init(mediaStream); // pass shared mediaStream if available
+  },
+  startCalibration() { return GazeEngine.startCalibration(); },
+  start() { FaceEngine.start(); GazeEngine.start(); AudioEngine.start(); },
+  stop()  { FaceEngine.stop();  GazeEngine.stop();  AudioEngine.stop();  },
+};
   </script>
 
   <script>
@@ -1627,6 +2141,10 @@ const ProfileConfig = (() => {
     special_needs:    SPECIAL_NEEDS_TUTOR,
     interview_coach:  INTERVIEW_COACH,
     language_teacher: LANGUAGE_TEACHER,
+    // UI profile card IDs — map to closest brain profile
+    adhd:    SPECIAL_NEEDS_TUTOR,
+    anxiety: SPECIAL_NEEDS_TUTOR,
+    asd:     SPECIAL_NEEDS_TUTOR,
   };
 
   return {
@@ -1850,9 +2368,15 @@ const ClaudeClient = (() => {
     if (!apiKey) { Bus.emit('intervention:trigger', { action: 'claude_response', message, done: true }); return; }
 
     let settled = false;
+    let receivedFirstChunk = false;
+    // Only use fallback if no response received after 15 seconds (network timeout, not slow response)
     const fallback = setTimeout(() => {
-      if (!settled) { settled = true; Bus.emit('intervention:trigger', { action: 'claude_response', message, done: true }); }
-    }, 3000);
+      if (!settled && !receivedFirstChunk) {
+        settled = true;
+        console.warn('[ClaudeClient] No response after 15s, using fallback');
+        Bus.emit('intervention:trigger', { action: 'claude_response', message, done: true });
+      }
+    }, 15000);
 
     try {
       const resp = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1895,8 +2419,10 @@ const ClaudeClient = (() => {
           if (raw === '[DONE]') continue;
           try {
             const evt = JSON.parse(raw);
-            if (evt.type === 'content_block_delta' && evt.delta?.text)
+            if (evt.type === 'content_block_delta' && evt.delta?.text) {
+              receivedFirstChunk = true; // got first chunk, don't fall back
               Bus.emit('intervention:trigger', { action: 'claude_response', chunk: evt.delta.text, done: false });
+            }
           } catch { /* skip malformed SSE */ }
         }
       }
@@ -2055,11 +2581,83 @@ window.BrainManager = {
 
   <script>
     // === APP INIT === //
-    document.addEventListener('DOMContentLoaded', () => {
-      if (window.AdaptIQ_UI) {
-        window.AdaptIQ_UI.init();
+    (async () => {
+      // Boot UI (runs loading sequence, then shows profile screen)
+      if (window.AdaptIQ_UI) window.AdaptIQ_UI.init();
+
+      // Set demo API key immediately so ClaudeClient is ready before any profile is chosen
+      if (window.ClaudeClient) {
+        const demoKey = document.getElementById('api-key-input')?.value?.trim();
+        if (demoKey) ClaudeClient.setApiKey(demoKey);
       }
-    });
+
+      const videoEl = document.getElementById('video-feed');
+      let sensorsInitialized = false;
+      let mediaStream = null; // shared stream for both video and audio
+
+      // profile:selected fires twice: once from UI (no config) then from BrainManager (with config).
+      // We only act on the first emission (from UI) to avoid double-init.
+      Bus.on('profile:selected', async ({ id, config }) => {
+        if (config) return; // BrainManager's re-emission — brain modules handle this one
+
+        // Re-read key in case user changed it after boot
+        const apiKey = document.getElementById('api-key-input')?.value?.trim();
+        if (apiKey && window.ClaudeClient) ClaudeClient.setApiKey(apiKey);
+
+        // Init brain — this re-emits profile:selected with { id, config } for brain modules
+        if (window.BrainManager) {
+          BrainManager.init(id);
+          BrainManager.start(); // starts 100ms anomaly detection loop (30s calibration window built-in)
+        }
+
+        // Reset audio transcript and sensor state for new session
+        if (window.AudioEngine) AudioEngine.reset();
+
+        // Init sensors once (loads face models + mic + gaze)
+        if (window.SensorManager && !sensorsInitialized) {
+          sensorsInitialized = true;
+          try {
+            // Request both video AND audio in one permission flow (UX better than separate requests)
+            if (!mediaStream) {
+              mediaStream = await navigator.mediaDevices.getUserMedia({
+                video: { width: 1280, height: 720 },
+                audio: true
+              });
+              if (videoEl) videoEl.srcObject = mediaStream;
+            }
+
+            await SensorManager.init(videoEl, mediaStream); // FaceEngine emits models:loaded when models finish
+            SensorManager.start();             // begin emitting signal:face / signal:gaze / signal:audio
+
+            // Start gaze calibration after sensors are ready
+            // (GazeEngine shows its own calibration overlay)
+            if (window.SensorManager) {
+              try {
+                await SensorManager.startCalibration();
+              } catch (err) {
+                console.warn('[AppInit] Gaze calibration failed:', err);
+              }
+            }
+          } catch (err) {
+            console.warn('[AppInit] Permission denied or sensor init failed:', err);
+            // Show error to user
+            const errMsg = err.name === 'NotAllowedError'
+              ? 'Camera/microphone access denied. AdaptIQ needs these to function.'
+              : 'Sensor initialization failed. Please refresh and try again.';
+            if (window.AdaptIQ_UI) {
+              window.AdaptIQ_UI.addEventLog('error', `<strong>Error:</strong> ${errMsg}`);
+            }
+            Bus.emit('models:loaded', {}); // still advance UI so user can try again
+          }
+        }
+      });
+
+      // End session button
+      document.getElementById('btn-end-session')?.addEventListener('click', () => {
+        if (window.SensorManager) SensorManager.stop();
+        if (window.BrainManager)  BrainManager.endSession();
+      });
+    })();
   </script>
 </body>
 </html>

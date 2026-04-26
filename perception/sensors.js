@@ -512,7 +512,13 @@ const AudioEngine = (() => {
   function getLatest()    { return latest; }
   function getTranscript(){ return fullTranscript; }
 
-  return { init, start, stop, getLatest, getTranscript };
+  function reset() {
+    fullTranscript = '';
+    wordTimestamps = [];
+    silenceWindows.length = 0;
+  }
+
+  return { init, start, stop, reset, getLatest, getTranscript };
 })();
 
 window.AudioEngine = AudioEngine;

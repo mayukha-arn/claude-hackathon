@@ -344,14 +344,18 @@ window.AdaptIQ_UI = (() => {
     const video = document.getElementById('video-feed');
     if (!video) return;
 
-    navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false })
-      .then(stream => {
-        video.srcObject = stream;
-      })
-      .catch(err => {
-        console.warn('[AdaptIQ UI] Camera access denied:', err);
-        updateVideoStatus(false);
-      });
+    // Video stream is now provided by APP INIT (shared with AudioEngine)
+    // Only request if not already set (for standalone testing)
+    if (!video.srcObject) {
+      navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 }, audio: false })
+        .then(stream => {
+          video.srcObject = stream;
+        })
+        .catch(err => {
+          console.warn('[AdaptIQ UI] Camera access denied:', err);
+          updateVideoStatus(false);
+        });
+    }
   }
 
   function updateVideoStatus(detected) {
